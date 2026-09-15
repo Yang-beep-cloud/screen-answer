@@ -1,0 +1,321 @@
+import base64
+import json
+import os
+import re
+import threading
+
+import requests
+
+import web_fetch
+
+TOOL_XML_RE = re.compile(r"<tool_calls>.*?</tool_calls>", re.S | re.I)
+INVOKE_XML_RE = re.compile(r"<invoke\b.*?</invoke>", re.S | re.I)
+LOOSE_XML_RE = re.compile(r"</?(tool_calls|invoke|parameter)\b[^>]*>", re.I)
+
+
+def strip_tool_xml(text):
+    if not text:
+        return text
+    t = TOOL_XML_RE.sub("", text)
+    t = INVOKE_XML_RE.sub("", t)
+    t = LOOSE_XML_RE.sub("", t)
+    return t.strip()
+
+DEFAULT_SYSTEM_PROMPT = """你是屏幕答题助手，尤其擅长「AI + 信息素养」类题目（信息检索、数据库使用、AI 工具、学术规范与伦理）。
+
+【最重要】这类题大多是「实操验证题」：题目会指向某个网站、数据库、文件或系统，必须真正去查证才能得到准确答案。严禁凭记忆猜测，严禁编造。
+
+答题方法：
+1. 先读题，找出题目指向的信息源线索：网址、数据库名（CNKI/万方/维普/PubMed/IEEE/ScienceDirect 等）、文件名、机构名、系统名、年份、卷期、页码等。
+2. 需要外部信息时，调用工具去查（search_web 先搜，fetch_web 看具体网页）。可以多轮调用，直到信息足够。
+3. 在拿到的内容里定位题目问的那个具体细节（页码、表格标题、被引次数、作者、字段名、分类号、截词符、检索式等），逐一核对每个选项。
+
+【信息源需要登录或付费时】这是重点：不要编造答案，也不要只回「无法核实」。改为输出一份**能直接照做的检索指引**，让人几分钟内自己查到答案。指引必须写清：
+
+- 用哪个库（并说明有无免费替代）
+- 入口路径：具体到点哪个按钮，例如「CNKI 首页 → 高级检索」
+- 检索式：哪个字段 + 什么关键词 + 逻辑关系，例如「篇名 = 信息素养 AND 出版年度 = 2015-2021」
+- 筛选条件：文献类型、来源类别、学科、时间范围等要勾选什么
+- 排序方式：按被引 / 按相关度 / 按时间，以及点哪里
+- 看哪个字段来对答案：例如「结果列表里第一条的『来源』列就是期刊名，与选项比对」
+
+常用库速查（写指引时按此给入口和筛选项）：
+- CNKI 知网：首页 → 高级检索；可限定 篇名/主题/作者/文献来源；筛 来源类别（CSSCI/北大核心/CSCD/SCI）、文献类型（期刊/学位论文/会议）、出版年度；结果支持 按被引、按下载 排序
+- 万方数据：首页 → 高级检索；筛 期刊来源、核心收录（CSSCI/北大核心）、时间；支持按被引排序
+- 维普：首页 → 高级检索；筛 期刊级别（北大核心/CSSCI/CSCD）、时间
+- PubMed：字段选 Title/Abstract，筛 Publication Type、Publication Date，Sort by 选 Best Match
+- IEEE Xplore / ScienceDirect / Wiley / Taylor & Francis：高级检索可限 Title、Publication Title、Year
+- 免费替代：国家哲学社会科学文献中心 ncpssd.org、CNKI 检索结果页本身（题录常可见）、超星/读秀、机构图书馆的开放资源
+
+输出格式（严格遵守）：
+- 单选题：只输出选项字母和答案，例如「A. 8」。不要任何解释、理由或括号说明。
+- 多选题：只输出选项字母，按字母顺序连写，例如「ABC」。不要任何解释、理由或括号说明。
+- 填空题：只输出填空内容，多个空用「；」分隔。
+- 问答题/计算题：输出完整解题过程和最终答案。
+- 上面「需要登录付费」的情形：输出检索指引，不要给答案。
+- 截图中有多道题：按题号逐题作答，每题套用上面的格式。
+- 截图里没有可识别的题目：只回复「未检测到题目。」
+
+数学公式用 LaTeX 写在 $...$ 或 $$...$$ 中（程序会自动渲染成图片）。不要输出代码块。"""
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_web",
+            "description": "用搜索引擎检索信息，返回若干条结果的标题、网址和摘要。适合先用它定位信息源。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "检索关键词，尽量精确"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_web",
+            "description": "抓取指定网址的正文内容。用于查看搜索结果中某个页面的具体内容。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "要抓取的完整网址"},
+                    "query": {
+                        "type": "string",
+                        "description": "可选。用于从长网页中筛选出最相关的段落",
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+]
+
+
+class LLMError(Exception):
+    pass
+
+
+class VisionClient:
+    def __init__(self, cfg):
+        self.base_url = cfg["base_url"].rstrip("/")
+        self.model = cfg["model"]
+        self.system_prompt = cfg.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
+        self.max_tokens = cfg.get("max_tokens", 32768)
+        self.temperature = cfg.get("temperature", 0.2)
+        self.timeout = cfg.get("timeout", 300)
+        self.enable_web = cfg.get("enable_web_fetch", True)
+        self.web_max_chars = cfg.get("web_max_chars", web_fetch.DEFAULT_PAGE_CHARS)
+        self.web_total_chars = cfg.get("web_total_chars", web_fetch.DEFAULT_TOTAL_CHARS)
+        self.web_max_rounds = cfg.get("web_max_rounds", 3)
+        self.web_max_urls = cfg.get("web_max_urls", 6)
+        self.api_key = os.environ.get(cfg.get("api_key_env", "USTC_API_KEY"), "").strip()
+        if not self.api_key:
+            raise LLMError(
+                "未找到 API Key。请设置环境变量 " + cfg.get("api_key_env", "USTC_API_KEY")
+            )
+
+    def _data_url(self, png_bytes):
+        return "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+
+    def _messages(self, png_bytes, question=None):
+        user_content = [
+            {"type": "text", "text": question or "请按格式要求解答截图中的题目。"},
+            {"type": "image_url", "image_url": {"url": self._data_url(png_bytes)}},
+        ]
+        return [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+
+    def _stream_once(self, messages, on_delta, on_reasoning, stop_event, allow_tools=True):
+        payload = {
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "stream": True,
+            "messages": messages,
+        }
+        if self.enable_web and allow_tools:
+            payload["tools"] = TOOLS
+            payload["tool_choice"] = "auto"
+
+        headers = {
+            "Authorization": "Bearer " + self.api_key,
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        }
+        url = self.base_url + "/v1/chat/completions"
+        content = []
+        reasoning = []
+        calls = {}
+        finish = None
+
+        with requests.post(
+            url, headers=headers, data=json.dumps(payload), stream=True, timeout=self.timeout
+        ) as resp:
+            if resp.status_code != 200:
+                raise LLMError("接口返回 %s: %s" % (resp.status_code, resp.text[:400]))
+            for raw in resp.iter_lines(decode_unicode=True):
+                if stop_event is not None and stop_event.is_set():
+                    break
+                if not raw:
+                    continue
+                line = raw.strip()
+                if line.startswith("data:"):
+                    line = line[5:].strip()
+                if line == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                choice = choices[0]
+                if choice.get("finish_reason"):
+                    finish = choice["finish_reason"]
+                delta = choice.get("delta") or {}
+                if delta.get("reasoning_content"):
+                    reasoning.append(delta["reasoning_content"])
+                    if on_reasoning:
+                        on_reasoning("".join(reasoning))
+                for tc in delta.get("tool_calls") or []:
+                    idx = tc.get("index", 0)
+                    entry = calls.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                    if tc.get("id"):
+                        entry["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        entry["name"] += fn["name"]
+                    if fn.get("arguments"):
+                        entry["arguments"] += fn["arguments"]
+                piece = delta.get("content")
+                if piece is None:
+                    piece = (choice.get("message") or {}).get("content")
+                if piece:
+                    content.append(piece)
+                    if on_delta:
+                        on_delta("".join(content))
+
+        tool_calls = [calls[k] for k in sorted(calls)]
+        return "".join(content).strip(), "".join(reasoning).strip(), finish, tool_calls
+
+    def _run_tool(self, call, on_stage):
+        name = call.get("name", "")
+        try:
+            args = json.loads(call.get("arguments") or "{}")
+        except json.JSONDecodeError:
+            return "参数解析失败"
+        if name == "search_web":
+            q = (args.get("query") or "").strip()
+            if not q:
+                return "缺少 query"
+            if on_stage:
+                on_stage("正在搜索：%s" % q[:40])
+            hits = web_fetch.search(q, max_results=self.web_max_urls)
+            if on_stage:
+                on_stage("搜索到 %d 条结果" % len(hits))
+            return web_fetch.format_search_for_prompt(hits, q)
+        if name == "fetch_web":
+            u = (args.get("url") or "").strip()
+            if not u.startswith("http"):
+                return "网址无效"
+            if on_stage:
+                on_stage("正在抓取：%s" % u[:50])
+            res = web_fetch.fetch(
+                u, query=(args.get("query") or ""), max_chars=self.web_max_chars
+            )
+            if on_stage:
+                on_stage("已抓取 %d 字" % res["chars"])
+            return web_fetch.format_for_prompt([res])
+        return "未知工具"
+
+    def answer_screen(
+        self,
+        png_bytes,
+        on_delta=None,
+        on_reasoning=None,
+        on_stage=None,
+        on_done=None,
+        on_error=None,
+        stop_event=None,
+    ):
+        def run():
+            try:
+                messages = self._messages(png_bytes)
+                text = reasoning = ""
+                finish = None
+                for round_no in range(self.web_max_rounds + 1):
+                    last_round = round_no >= self.web_max_rounds
+                    if last_round:
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "（工具调用次数已用完，现在不能再调用工具。）\n"
+                                    "请立即处理：\n"
+                                    "1) 若已获得的信息足以确定答案，直接按输出格式给出答案；\n"
+                                    "2) 若该题必须访问需登录/付费的数据库（如 CNKI、万方、维普、ScienceDirect）"
+                                    "而无法核实，请按系统提示词的要求输出【检索指引】，"
+                                    "写清入口、检索式、筛选条件、排序方式、看哪个字段对答案；\n"
+                                    "3) 不要再输出任何工具调用标记或 JSON。"
+                                ),
+                            }
+                        )
+                    text, reasoning, finish, calls = self._stream_once(
+                        messages,
+                        on_delta,
+                        on_reasoning,
+                        stop_event,
+                        allow_tools=not last_round,
+                    )
+                    if stop_event is not None and stop_event.is_set():
+                        break
+                    if not calls or last_round:
+                        break
+
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": text or None,
+                            "tool_calls": [
+                                {
+                                    "id": c["id"] or ("call_%d" % i),
+                                    "type": "function",
+                                    "function": {
+                                        "name": c["name"],
+                                        "arguments": c["arguments"] or "{}",
+                                    },
+                                }
+                                for i, c in enumerate(calls)
+                            ],
+                        }
+                    )
+                    for i, c in enumerate(calls):
+                        result = self._run_tool(c, on_stage)
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": c["id"] or ("call_%d" % i),
+                                "content": result,
+                            }
+                        )
+                    if on_stage:
+                        on_stage("已获取资料，正在作答…")
+
+                final = strip_tool_xml(text)
+                if not final and reasoning:
+                    final = strip_tool_xml(reasoning)
+                if on_done:
+                    on_done(final, reasoning, finish)
+            except Exception as exc:  # noqa: BLE001
+                if on_error:
+                    on_error(str(exc))
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        return t

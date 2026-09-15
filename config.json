@@ -1,0 +1,26 @@
+{
+  "backend": "api",
+  "base_url": "https://api.deepseek.com",
+  "api_key_env": "DEEPSEEK_API_KEY",
+  "api_key_provider": "deepseek",
+  "model": "deepseek-flash",
+  "hotkey": "<ctrl>+<alt>+q",
+  "hotkey_label": "Ctrl+Alt+Q",
+  "enable_web_fetch": true,
+  "web_max_chars": 40000,
+  "web_total_chars": 120000,
+  "web_max_rounds": 6,
+  "web_max_urls": 6,
+  "opencode": {
+    "port": 45123,
+    "provider": "ustc",
+    "model": "glm-5.3-flash",
+    "agent": "build",
+    "enable_web": true
+  },
+  "max_tokens": 32768,
+  "temperature": 0.2,
+  "capture_scale": 1.0,
+  "capture_delay_ms": 200,
+  "timeout": 300
+}

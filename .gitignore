@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environment
+.venv/
+venv/
+
+# LaTeX render cache
+cache/
+
+# Logs
+error.log
+*.log
+
+# Local config overrides / secrets
+.env
+config.local.json
+
+# Third-party scraped reference material (命题范围/样题 from the competition site)
+data/
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

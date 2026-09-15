@@ -1,0 +1,7 @@
+mss==10.0.0
+Pillow==11.3.0
+requests==2.32.5
+pynput==1.8.1
+pystray==0.19.5
+PyMuPDF==1.28.2
+trafilatura==2.2.0
