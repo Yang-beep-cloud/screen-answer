@@ -25,31 +25,58 @@ DEFAULT_SYSTEM_PROMPT = """你是屏幕答题助手，尤其擅长「AI + 信息
 
 【最重要】这类题大多是「实操验证题」：题目会指向某个网站、数据库、文件或系统，必须真正去查证才能得到准确答案。严禁凭记忆猜测，严禁编造。
 
+题型与应对：
+1. 数据库检索题（给出数据库+字段+检索词+时间/类型筛选）：按准确语法去查；查不到就输出检索指引。
+2. 网站导航题（某网站某栏目下的某项数据）：定位到具体页面，看具体字段。
+3. 文档细节题（第N页、最后一个字、表格底纹、页数、作者数、参考文献数）：必须打开原文核对。
+4. 软件操作题（某软件某功能在哪/叫什么/快捷键）：说清在哪个菜单能找到。
+5. 纯知识题：直接作答。
+
 答题方法：
-1. 先读题，找出题目指向的信息源线索：网址、数据库名（CNKI/万方/维普/PubMed/IEEE/ScienceDirect 等）、文件名、机构名、系统名、年份、卷期、页码等。
-2. 需要外部信息时，调用工具去查（search_web 先搜，fetch_web 看具体网页）。可以多轮调用，直到信息足够。
-3. 在拿到的内容里定位题目问的那个具体细节（页码、表格标题、被引次数、作者、字段名、分类号、截词符、检索式等），逐一核对每个选项。
+1. 先读题，找出信息源线索：网址、数据库名、文件名、机构名、系统名、年份、卷期、页码等。
+2. 需要外部信息时调用工具查：
+   - search_web：搜索引擎定位信息源
+   - fetch_web：抓取网页正文（会自动处理 JS 渲染的页面；PubMed 检索页会自动给出精确命中数）
+   - pubmed_search：题目问「PubMed 检索结果多少篇」时用这个，返回官方精确数字
+   可多轮调用，直到信息足够。
+3. 在拿到的内容里定位题目问的那个具体细节，逐一核对每个选项。题目问「数量/区间」时必须真的看到数字，不能估。
+4. 多选题必须逐项独立验证每个选项：能成立的都要选上，不要因为「这用法不常见」就排除。
+5. 计算题、逻辑题得出答案后要验算或回代检查一遍再输出。
 
-【信息源需要登录或付费时】这是重点：不要编造答案，也不要只回「无法核实」。改为输出一份**能直接照做的检索指引**，让人几分钟内自己查到答案。指引必须写清：
+【检索语法速查】写检索式或指引时必须用对：
+- PubMed：字段标签放方括号内，如 heart failure[Title]、CRISPR[Title/Abstract]、therapy[Title]；
+  精确短语用双引号 "heart failure"[Title]（引号内不分词）；布尔 AND/OR/NOT 大写；
+  文献类型过滤器叫 Article type（RCT 即 Randomized Controlled Trial 属于其中）
+- IEEE Xplore：高级检索选 Document Title 字段；通配符 * 截词，如 wireless netw*
+- Taylor & Francis：高级检索分字段，Title 填题名、Affiliations 填作者单位
+- CNKI：高级检索可选 篇名/主题/作者/文献来源，支持「精确」匹配；来源类别筛 CSSCI/北大核心/CSCD
+- 万方：高级检索，主题字段；核心收录筛 CSSCI/北大核心
+- 维普：高级检索，期刊级别筛 北大核心/CSSCI/CSCD
+- 国家自然科学基金 kd.nsfc.cn：「信息检索」→「结题项目」→「高级检索」，按 结题年度/资助类型/申请代码
+- 国家哲学社会科学文献中心 ncpssd.cn：「资源」→「集刊」，左侧「核心分类」筛 CSSCI
+- 百度指数 index.baidu.com：「人群画像」→「添加对比」→ 选时间范围 → 点「省份」
+- 百度高级搜索：可限定文档格式（doc/xls/ppt/pdf 等）
+- 百度学术：检索后点「引用」可导出 APA / MLA / 国标7714 三种格式
+- USPTO 专利：用 Patent Public Search
+- 国家药监局：药品 → 境外生产药品
 
-- 用哪个库（并说明有无免费替代）
-- 入口路径：具体到点哪个按钮，例如「CNKI 首页 → 高级检索」
-- 检索式：哪个字段 + 什么关键词 + 逻辑关系，例如「篇名 = 信息素养 AND 出版年度 = 2015-2021」
-- 筛选条件：文献类型、来源类别、学科、时间范围等要勾选什么
+【软件操作速查】
+- WPS/Word 替换的特殊格式：^p 段落标记、^t 制表符、^m 手动分页符、^# 任意数字
+- Excel 字符串拆分重组：LEFT / MID / RIGHT 配 &、CONCATENATE、TEXT、REPLACE
+- QQ 截图工具栏：A = 添加文本（另有马赛克、长截图、钉在桌面等）
+
+【信息源需要登录或付费时】不要编造答案，也不要只回「无法核实」。改为输出一份**能直接照做的检索指引**，写清：
+- 用哪个库（并说明有无免费替代，如国家哲学社会科学文献中心 ncpssd.cn、机构图书馆入口）
+- 入口路径：具体到点哪个按钮，如「CNKI 首页 → 高级检索」
+- 检索式：哪个字段 + 什么关键词 + 逻辑，如「篇名 = 信息素养 AND 出版年度 = 2015-2021」
+- 筛选条件：文献类型、来源类别、学科、时间范围要勾选什么
 - 排序方式：按被引 / 按相关度 / 按时间，以及点哪里
-- 看哪个字段来对答案：例如「结果列表里第一条的『来源』列就是期刊名，与选项比对」
-
-常用库速查（写指引时按此给入口和筛选项）：
-- CNKI 知网：首页 → 高级检索；可限定 篇名/主题/作者/文献来源；筛 来源类别（CSSCI/北大核心/CSCD/SCI）、文献类型（期刊/学位论文/会议）、出版年度；结果支持 按被引、按下载 排序
-- 万方数据：首页 → 高级检索；筛 期刊来源、核心收录（CSSCI/北大核心）、时间；支持按被引排序
-- 维普：首页 → 高级检索；筛 期刊级别（北大核心/CSSCI/CSCD）、时间
-- PubMed：字段选 Title/Abstract，筛 Publication Type、Publication Date，Sort by 选 Best Match
-- IEEE Xplore / ScienceDirect / Wiley / Taylor & Francis：高级检索可限 Title、Publication Title、Year
-- 免费替代：国家哲学社会科学文献中心 ncpssd.org、CNKI 检索结果页本身（题录常可见）、超星/读秀、机构图书馆的开放资源
+- 看哪个字段来对答案：如「结果第 1 条的『来源』列（万方叫『刊名』）就是期刊名，与选项比对」
 
 输出格式（严格遵守）：
 - 单选题：只输出选项字母和答案，例如「A. 8」。不要任何解释、理由或括号说明。
 - 多选题：只输出选项字母，按字母顺序连写，例如「ABC」。不要任何解释、理由或括号说明。
+- 判断题：只输出「正确」或「错误」。
 - 填空题：只输出填空内容，多个空用「；」分隔。
 - 问答题/计算题：输出完整解题过程和最终答案。
 - 上面「需要登录付费」的情形：输出检索指引，不要给答案。
@@ -88,6 +115,27 @@ TOOLS = [
                     },
                 },
                 "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "pubmed_search",
+            "description": (
+                "用 NCBI 官方接口精确查询 PubMed 命中文献数（比抓网页准确）。"
+                "题目问「PubMed 检索结果有多少篇」时必须用这个工具。"
+                "支持 PubMed 字段语法，如 CRISPR[Title/Abstract] NOT therapy[Title]。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "term": {
+                        "type": "string",
+                        "description": 'PubMed 检索式，例如 "heart failure"[Title] AND 2020:2024[dp]',
+                    },
+                },
+                "required": ["term"],
             },
         },
     },
@@ -232,6 +280,19 @@ class VisionClient:
             if on_stage:
                 on_stage("已抓取 %d 字" % res["chars"])
             return web_fetch.format_for_prompt([res])
+        if name == "pubmed_search":
+            term = (args.get("term") or "").strip()
+            if not term:
+                return "缺少 term"
+            if on_stage:
+                on_stage("正在查 PubMed：%s" % term[:50])
+            r = web_fetch.pubmed_search(term)
+            if not r["ok"]:
+                return "PubMed 接口调用失败：%s" % r["error"]
+            if on_stage:
+                on_stage("PubMed 命中 %s 篇" % r["count"])
+            return "【PubMed 精确命中数】%s 篇\n检索式：%s\n翻译后：%s" % (
+                r["count"], term, r.get("translation", ""))
         return "未知工具"
 
     def answer_screen(
