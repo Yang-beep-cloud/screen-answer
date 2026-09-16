@@ -38,6 +38,7 @@ DEFAULT_SYSTEM_PROMPT = """你是屏幕答题助手，尤其擅长「AI + 信息
    - search_web：搜索引擎定位信息源
    - fetch_web：抓取网页正文（会自动处理 JS 渲染的页面；PubMed 检索页会自动给出精确命中数）
    - pubmed_search：题目问「PubMed 检索结果多少篇」时用这个，返回官方精确数字
+   - github_files：题目问「GitHub 某仓库某文件夹有几个文件」时用这个，返回官方精确清单
    可多轮调用，直到信息足够。
 3. 在拿到的内容里定位题目问的那个具体细节，逐一核对每个选项。题目问「数量/区间」时必须真的看到数字，不能估。
 4. 多选题必须逐项独立验证每个选项：能成立的都要选上，不要因为「这用法不常见」就排除。
@@ -49,15 +50,22 @@ DEFAULT_SYSTEM_PROMPT = """你是屏幕答题助手，尤其擅长「AI + 信息
 国家药监局 nmpa.gov.cn、奎章阁 wenxianxue.cn、PubMed、课程思政平台 xhsz.news.cn、
 研招网 yz.chsi.com.cn、CNKI 首页、国家图书馆 nlc.cn、国家哲社文献中心 ncpssd.cn、
 中国互联网联合辟谣 piyao.org.cn、问卷星 wjx.cn、云展网、国家标准全文公开系统、
-Nature、科技部 most.gov.cn（含 PDF）
+Nature、科技部 most.gov.cn（含 PDF）、
+MIT Theses libraries.mit.edu、CNKI RSS rss.cnki.net、GitHub、arXiv、
+全国标准信息公共服务平台 std.samr.gov.cn、NCBI bookshelf、
+国家社科基金 fz.people.com.cn、HIPPTER、共产党员网 12371.cn、微词云、
+福建省图书馆 fjlib.net、中国庭审公开网 tingshen.court.gov.cn
 
 以下站点需要 JS 渲染，程序会自动处理，可以正常抓：
 国家自然科学基金 kd.nsfc.cn、一席 yixi.tv、川大图书馆、百度学术、360图片、
-GitHub、国家智慧教育平台 graduate.smartedu.cn、讯飞星火、USPTO
+国家智慧教育平台 graduate.smartedu.cn、讯飞星火、USPTO、智慧树 zhihuishu.com、
+国家统计局 data.stats.gov.cn
 
-以下站点实测抓不到（反爬/需登录/纯 JS 且渲染后仍无内容），**不要浪费轮次去抓，直接输出检索指引**：
+以下站点实测抓不到（反爬/需登录/需交互），**不要浪费轮次去抓，直接输出检索指引**：
 IEEE Xplore、Taylor&Francis、牛津学术、百度指数、UNESCO 数字图书馆、
-智谱清言、纳米AI、ECharts 示例页、全国律师诚信平台、PubScholar
+智谱清言、纳米AI、ECharts 示例页、全国律师诚信平台、PubScholar、
+国家知识产权局专利检索系统、中国证券业协会、国家卫健委、
+千问 qianwen.com、知乎直答、ACM DL、豆包、中国专利公布公告系统、星火科研助手 paper.xfyun.cn
 
 【检索语法速查】写检索式或指引时必须用对：
 - PubMed：字段标签放方括号内，如 heart failure[Title]、CRISPR[Title/Abstract]、therapy[Title]；
@@ -78,8 +86,20 @@ IEEE Xplore、Taylor&Francis、牛津学术、百度指数、UNESCO 数字图书
 
 【软件操作速查】
 - WPS/Word 替换的特殊格式：^p 段落标记、^t 制表符、^m 手动分页符、^# 任意数字
+- Word 快速分页：Ctrl+Enter（不是 Ctrl+Shift）
 - Excel 字符串拆分重组：LEFT / MID / RIGHT 配 &、CONCATENATE、TEXT、REPLACE
+- Excel VLOOKUP：第1参数=查找值，第2参数=查找范围（必须包含查找值与返回值列），
+  第3参数=返回值在范围内的相对列号，第4参数=FALSE 表示精确匹配
 - QQ 截图工具栏：A = 添加文本（另有马赛克、长截图、钉在桌面等）
+
+【其它检索常识】
+- 百度高级语法：filetype:PDF 限定文献类型、site:域名 限定来源网站（域名不带 http://）；
+  「file:PDF」不是有效语法
+- 万方：引号括起来是精确匹配，对连字符、空格高度敏感，会漏检「白细胞介素 6」「IL-6」等不同写法
+- GB/T 7714 文献类型标识：期刊 J、会议 C、学位论文 D、专著 M、报纸 N、报告 R、标准 S、专利 P
+- 预印本：arXiv 数学大类收录起始于 1992 年
+- 维普：高级检索可选精确匹配，筛 CSSCI/北大核心/CSCD，结果可按学科主题聚合
+- 中国庭审公开网可用案号检索；国家统计局 data.stats.gov.cn 走「地区数据→分省年度数据」
 
 【信息源需要登录或付费时】不要编造答案，也不要只回「无法核实」。改为输出一份**能直接照做的检索指引**，写清：
 - 用哪个库（并说明有无免费替代，如国家哲学社会科学文献中心 ncpssd.cn、机构图书馆入口）
@@ -152,6 +172,26 @@ TOOLS = [
                     },
                 },
                 "required": ["term"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "github_files",
+            "description": (
+                "用 GitHub 官方接口精确列出仓库某个目录下的文件（题目常问「某文件夹有几个文件」）。"
+                "比抓网页准确，也能绕开 github.com 网页访问不稳的问题。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "owner": {"type": "string", "description": "仓库所有者，如 onnx"},
+                    "repo": {"type": "string", "description": "仓库名，如 onnx"},
+                    "path": {"type": "string", "description": "目录路径，如 LICENSES；留空表示根目录"},
+                    "ref": {"type": "string", "description": "分支或 tag，如 main；可留空"},
+                },
+                "required": ["owner", "repo"],
             },
         },
     },
@@ -309,6 +349,19 @@ class VisionClient:
                 on_stage("PubMed 命中 %s 篇" % r["count"])
             return "【PubMed 精确命中数】%s 篇\n检索式：%s\n翻译后：%s" % (
                 r["count"], term, r.get("translation", ""))
+        if name == "github_files":
+            owner = (args.get("owner") or "").strip()
+            repo = (args.get("repo") or "").strip()
+            if not owner or not repo:
+                return "缺少 owner 或 repo"
+            path = (args.get("path") or "").strip()
+            ref = (args.get("ref") or "").strip() or None
+            if on_stage:
+                on_stage("正在查 GitHub：%s/%s/%s" % (owner, repo, path))
+            g = web_fetch.github_dir(owner, repo, path, ref)
+            if not g["ok"]:
+                return "GitHub 查询失败：%s" % g["error"]
+            return g["text"]
         return "未知工具"
 
     def answer_screen(

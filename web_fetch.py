@@ -141,6 +141,49 @@ def extract_pdf(content):
     return "\n".join(parts)
 
 
+GITHUB_API = "https://api.github.com"
+GH_TREE_RE = re.compile(
+    r"^https?://github\.com/([^/]+)/([^/]+)/(?:tree|blob)/([^/]+)/?(.*)$", re.I
+)
+GH_REPO_RE = re.compile(r"^https?://github\.com/([^/]+)/([^/]+)/?$", re.I)
+
+
+def github_dir(owner, repo, path="", ref=None, timeout=25):
+    """用 GitHub API 精确列目录（比抓网页准，题目常问「某文件夹有几个文件」）。"""
+    api = "%s/repos/%s/%s/contents/%s" % (GITHUB_API, owner, repo, path.strip("/"))
+    if ref:
+        api += "?ref=" + ref
+    try:
+        req = requests.get(
+            api,
+            headers={"User-Agent": "screen-answer", "Accept": "application/vnd.github+json"},
+            timeout=timeout,
+        )
+        if req.status_code == 404:
+            return {"ok": False, "error": "路径不存在（仓库/分支/目录名可能有误）"}
+        req.raise_for_status()
+        data = req.json()
+    except (requests.RequestException, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
+    if not isinstance(data, list):
+        return {"ok": False, "error": "该路径不是目录"}
+    lines = ["【GitHub 目录】%s/%s/%s  共 %d 项" % (owner, repo, path.strip("/") or "(根)", len(data))]
+    for it in data:
+        lines.append("  - %s (%s)" % (it.get("name"), it.get("type")))
+    return {"ok": True, "count": len(data), "text": "\n".join(lines), "items": data}
+
+
+def github_from_url(url):
+    m = GH_TREE_RE.match(url)
+    if m:
+        owner, repo, ref, path = m.groups()
+        return github_dir(owner, repo, path, ref)
+    m = GH_REPO_RE.match(url)
+    if m:
+        return github_dir(m.group(1), m.group(2), "")
+    return None
+
+
 def _decode(resp):
     """按响应头/实际内容正确解码，避免中文乱码。"""
     enc = (resp.encoding or "").lower()
@@ -153,6 +196,13 @@ def _decode(resp):
 
 
 def fetch(url, query="", max_chars=DEFAULT_PAGE_CHARS, timeout=25, render_fallback=True):
+    gh = github_from_url(url)
+    if gh is not None:
+        if gh.get("ok"):
+            return {"url": url, "ok": True, "error": None, "text": gh["text"],
+                    "chars": len(gh["text"]), "rendered": False}
+        return {"url": url, "ok": False, "error": gh.get("error", "GitHub 查询失败"),
+                "text": "", "chars": 0}
     if is_pubmed_url(url):
         term = pubmed_term_from_url(url)
         if term:
