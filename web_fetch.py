@@ -116,6 +116,31 @@ def select_relevant(text, query, budget):
     return "\n\n".join(p for _, p in chosen)
 
 
+def extract_pdf(content):
+    """用 PyMuPDF 提取 PDF 文本，带页码标记（题目常问「第N页」）。"""
+    try:
+        import pymupdf
+    except ImportError:
+        return None
+    try:
+        doc = pymupdf.open(stream=content, filetype="pdf")
+    except Exception:  # noqa: BLE001
+        return None
+    if doc.page_count == 0:
+        return None
+    parts = ["【PDF 共 %d 页】" % doc.page_count]
+    for i in range(doc.page_count):
+        try:
+            t = doc[i].get_text()
+        except Exception:  # noqa: BLE001
+            t = ""
+        t = t.strip()
+        if t:
+            parts.append("\n【第 %d 页】\n%s" % (i + 1, t))
+    doc.close()
+    return "\n".join(parts)
+
+
 def _decode(resp):
     """按响应头/实际内容正确解码，避免中文乱码。"""
     enc = (resp.encoding or "").lower()
@@ -144,8 +169,16 @@ def fetch(url, query="", max_chars=DEFAULT_PAGE_CHARS, timeout=25, render_fallba
     try:
         r = requests.get(url, headers=HEADERS, timeout=timeout)
         r.raise_for_status()
-        html = _decode(r)
         ctype = (r.headers.get("content-type") or "").lower()
+        is_pdf = "pdf" in ctype or url.lower().split("?")[0].endswith(".pdf")
+        if is_pdf:
+            pdf_text = extract_pdf(r.content)
+            if pdf_text:
+                text = select_relevant(pdf_text, query, max_chars)
+                return {"url": url, "ok": True, "error": None, "text": text,
+                        "chars": len(text), "rendered": False, "pdf": True}
+            return {"url": url, "ok": False, "error": "PDF 解析失败", "text": "", "chars": 0}
+        html = _decode(r)
     except requests.RequestException as exc:
         if render_fallback:
             rendered, err = render_with_browser(url, timeout=60)

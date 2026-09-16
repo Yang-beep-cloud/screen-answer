@@ -43,6 +43,22 @@ DEFAULT_SYSTEM_PROMPT = """你是屏幕答题助手，尤其擅长「AI + 信息
 4. 多选题必须逐项独立验证每个选项：能成立的都要选上，不要因为「这用法不常见」就排除。
 5. 计算题、逻辑题得出答案后要验算或回代检查一遍再输出。
 
+【PDF 文档】fetch_web 会自动解析 PDF 并标注每页（【第 N 页】），同时给出总页数。注意**页码偏移**：题目说「正文第 N 页」时，正文往往不是从 PDF 第 1 页开始（前面有封面、目录），要先找到正文起始页再换算，例如封面+目录占 2 页时，正文第14页 = PDF 第16页。
+
+【站点可达性】以下站点本程序实测可直接抓取，优先去抓：
+国家药监局 nmpa.gov.cn、奎章阁 wenxianxue.cn、PubMed、课程思政平台 xhsz.news.cn、
+研招网 yz.chsi.com.cn、CNKI 首页、国家图书馆 nlc.cn、国家哲社文献中心 ncpssd.cn、
+中国互联网联合辟谣 piyao.org.cn、问卷星 wjx.cn、云展网、国家标准全文公开系统、
+Nature、科技部 most.gov.cn（含 PDF）
+
+以下站点需要 JS 渲染，程序会自动处理，可以正常抓：
+国家自然科学基金 kd.nsfc.cn、一席 yixi.tv、川大图书馆、百度学术、360图片、
+GitHub、国家智慧教育平台 graduate.smartedu.cn、讯飞星火、USPTO
+
+以下站点实测抓不到（反爬/需登录/纯 JS 且渲染后仍无内容），**不要浪费轮次去抓，直接输出检索指引**：
+IEEE Xplore、Taylor&Francis、牛津学术、百度指数、UNESCO 数字图书馆、
+智谱清言、纳米AI、ECharts 示例页、全国律师诚信平台、PubScholar
+
 【检索语法速查】写检索式或指引时必须用对：
 - PubMed：字段标签放方括号内，如 heart failure[Title]、CRISPR[Title/Abstract]、therapy[Title]；
   精确短语用双引号 "heart failure"[Title]（引号内不分词）；布尔 AND/OR/NOT 大写；
