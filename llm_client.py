@@ -108,6 +108,12 @@ ScienceDirect、Wiley、UNESCO 数字图书馆、百度指数、智谱清言、A
 4. 软件操作题（某软件某功能在哪/叫什么/快捷键）：说清在哪个菜单能找到。
 5. 纯知识题：直接作答。
 
+官方备赛要点（据大赛培训材料）：
+- 以探索、实操型题目为主，重点考「栏目结构、检索路径、功能入口、页面细节」
+- 常见出题方向：项目许可协议、项目主题、数据集类型、模型任务类型；
+  某个按钮的功能、快捷键、输出文件格式、是否收费
+- 涉及平台功能、操作细节和具体结果时，必须通过实际平台或官方文件核实
+
 答题方法：
 1. 先读题，找出信息源线索：网址、数据库名、文件名、机构名、系统名、年份、卷期、页码等。
 2. 需要外部信息时调用工具查：
@@ -187,8 +193,26 @@ CNKI 中国法律智库 lawpro.cnki.net、CNKI 中国学术会议网 conf.cnki.n
 - 百度高级语法：filetype:PDF 限定文献类型、site:域名 限定来源网站（域名不带 http://）；
   「file:PDF」不是有效语法
 - 万方：引号括起来是精确匹配，对连字符、空格高度敏感，会漏检「白细胞介素 6」「IL-6」等不同写法
-- GB/T 7714 文献类型标识：期刊 J、会议 C、学位论文 D、专著 M、报纸 N、报告 R、标准 S、专利 P
-- 预印本：arXiv 数学大类收录起始于 1992 年
+- GB/T 7714-2025 文献类型标识（官方培训给出）：
+  [J] 期刊、[M] 图书、[D] 学位论文、[C] 会议、[P] 专利、
+  [EB] 网页、[DS] 数据集、[PP] 预印本
+- QQ 快捷键：截图 Ctrl+Alt+A、录屏 Ctrl+Alt+R、屏幕识图 Ctrl+Alt+O、屏幕翻译 Ctrl+Alt+F
+- Excel 高频函数：LEFT/RIGHT/MID/FIND/TRIM/REPLACE/SUBSTITUTE/CONCATENATE/CLEAN/
+  VLOOKUP/COUNTIF/COUNTIFS/SUMIF/SUMIFS/IF/INDEX/MATCH
+  （重点记函数作用，按场景选对函数，不必背参数）
+- 各场景 AI 工具（官方备赛清单）：
+  通用：DeepSeek、豆包、腾讯元宝、智谱清言、通义/千问、Kimi、讯飞星火、文心、纳米AI
+  办公：PPT(Kimi/通义千问/豆包/智谱清言)、写作(文心/豆包/讯飞星火)、
+  数据处理(豆包/智谱清言)、会议整理(通义千问)
+  科研：LeapSpace、CNKI AI、星火科研助手、秘塔AI搜索、豆包、AMiner
+  多模态：图像视频(豆包/智谱清言/万相/可灵AI)、音乐(豆包)、数字人(闪剪/蝉镜)
+  文献管理：知网研学、Zotero、Mendeley（导入方式：DOI/数据库检索/本地PDF/RIS·BibTeX题录）
+  文献追踪：CNKI 关键词订阅与 RSS、万方「我的订阅」、PubMed Create RSS / Create Alert
+- 免费学习资源入口：高校信息素养教育数据库 suyang.zxhnzq.com/lecture、
+  知网学术大讲堂 k.cnki.net/home、万方视频 video.wangfangdata.com.cn、
+  学习强国 xuexi.cn、和鲸社区 HeyWhale、百度 AI Studio、DataFountain
+- 微词云非会员每日仅免费 3 次，不要反复刷新
+- 产品界面与功能会更新，以平台官网/APP 实际显示为准
 - 维普：高级检索可选精确匹配，筛 CSSCI/北大核心/CSCD，结果可按学科主题聚合
 - ScienceDirect：官方帮助页明确支持的检索技术只有 AND/OR/NOT、连字符(=NOT)、括号、
   双引号短语、复数与拼写变体；**不支持截词符 *（输入 electro* 不会匹配 electron/electrode）**
