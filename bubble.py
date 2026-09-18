@@ -10,6 +10,11 @@ MUTED = "#9aa0b5"
 BORDER = "#3a3d4d"
 ERR = "#f7768e"
 
+DEFAULT_LINES = 16
+DEFAULT_COLS = 58
+MIN_LINES = 8
+MAX_LINES = 34
+
 MATH_RE = re.compile(r"(\$\$.+?\$\$|\\\[.+?\\\]|\\\(.+?\\\)|\$[^$\n]+?\$)", re.DOTALL)
 
 
@@ -53,15 +58,16 @@ class Bubble:
 
         bar = tk.Frame(self.inner, bg=BG)
         bar.pack(fill="x", padx=10, pady=(8, 0))
+        self.bar = bar
         self.title = tk.Label(
             bar, text="屏幕答题", bg=BG, fg=ACCENT, font=("Microsoft YaHei UI", 10, "bold")
         )
         self.title.pack(side="left")
-        close = tk.Label(
+        self.close = tk.Label(
             bar, text="✕", bg=BG, fg=MUTED, font=("Microsoft YaHei UI", 11), cursor="hand2"
         )
-        close.pack(side="right")
-        close.bind("<Button-1>", lambda e: self.hide())
+        self.close.pack(side="right")
+        self.close.bind("<Button-1>", lambda e: self.hide())
 
         self.status = tk.Label(
             self.inner, text="准备就绪", bg=BG, fg=MUTED, font=("Microsoft YaHei UI", 8), anchor="w"
@@ -70,6 +76,7 @@ class Bubble:
 
         wrap = tk.Frame(self.inner, bg=BG)
         wrap.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        self.wrap = wrap
 
         self.scroll = tk.Scrollbar(
             wrap,
@@ -93,8 +100,8 @@ class Bubble:
             relief="flat",
             borderwidth=0,
             highlightthickness=0,
-            height=6,
-            width=42,
+            height=DEFAULT_LINES,
+            width=DEFAULT_COLS,
             cursor="arrow",
             yscrollcommand=self.scroll.set,
             padx=2,
@@ -105,14 +112,16 @@ class Bubble:
         self.body.configure(state="disabled")
 
         for seq, fn in (("<Button-1>", self._start_move), ("<B1-Motion>", self._on_move)):
-            for w in (self.inner, self.title, self.status):
+            for w in (self.frame, self.inner, self.bar, self.title, self.status, self.wrap):
                 w.bind(seq, fn)
+        self.body.bind("<Button-1>", self._body_press)
+        self.body.bind("<B1-Motion>", self._body_motion)
 
         self._drag = (0, 0)
         self._visible = False
         self._user_moved = False
         self._full_text = ""
-        self._lines = 6
+        self._lines = DEFAULT_LINES
         self._images = []
 
     @property
@@ -124,7 +133,24 @@ class Bubble:
 
     def _on_move(self, event):
         self._user_moved = True
-        self.root.geometry("+%d+%d" % (event.x_root - self._drag[0], event.y_root - self._drag[1]))
+        x = event.x_root - self._drag[0]
+        y = event.y_root - self._drag[1]
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        w = self.root.winfo_width()
+        h = self.root.winfo_height()
+        keep = 48
+        x = max(keep - w, min(x, sw - keep))
+        y = max(0, min(y, sh - keep))
+        self.root.geometry("+%d+%d" % (x, y))
+
+    def _body_press(self, event):
+        self._start_move(event)
+        return "break"
+
+    def _body_motion(self, event):
+        self._on_move(event)
+        return "break"
 
     def _place(self):
         self.root.update_idletasks()
@@ -164,12 +190,21 @@ class Bubble:
             self.body.insert("end", "\n")
         return True
 
+    def _max_lines(self):
+        try:
+            sh = self.root.winfo_screenheight()
+        except tk.TclError:
+            return MAX_LINES
+        line_h = max(12, int(self.body.winfo_fpixels("1i") / 6.5))
+        fit = max(MIN_LINES, (sh - 200) // line_h)
+        return max(MIN_LINES, min(MAX_LINES, fit))
+
     def _autosize(self):
         try:
             n = self.body.count("1.0", "end", "displaylines")[0]
         except (tk.TclError, TypeError, IndexError):
-            n = 8
-        n = max(4, min(int(n) + 1, 24))
+            n = DEFAULT_LINES
+        n = max(MIN_LINES, min(int(n) + 1, self._max_lines()))
         if n != self._lines:
             self._lines = n
             self.body.configure(height=n)
@@ -197,8 +232,8 @@ class Bubble:
         self.set_status("正在思考…", ACCENT)
         self._clear()
         self._done_edit()
-        self._lines = 6
-        self.body.configure(height=6)
+        self._lines = DEFAULT_LINES
+        self.body.configure(height=DEFAULT_LINES)
         if not self._user_moved:
             self._place()
         self.root.attributes("-topmost", True)
