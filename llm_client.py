@@ -12,6 +12,67 @@ TOOL_XML_RE = re.compile(r"<tool_calls>.*?</tool_calls>", re.S | re.I)
 INVOKE_XML_RE = re.compile(r"<invoke\b.*?</invoke>", re.S | re.I)
 LOOSE_XML_RE = re.compile(r"</?(tool_calls|invoke|parameter)\b[^>]*>", re.I)
 
+_ANSWER_LINE_RES = [
+    re.compile(r"^\**\s*([A-D]{2,4})\s*\**$"),
+    re.compile(r"^\**\s*([A-D])\s*[.、．]\s*(正确|错误)\s*\**$"),
+    re.compile(r"^\**\s*([A-D])\s*[.、．]\s*(\S.*?)\s*\**$"),
+    re.compile(r"^\**\s*([A-D])\s*\**$"),
+    re.compile(r"^\**\s*(正确|错误)\s*\**$"),
+    re.compile(r"^答案[：:]\s*\**\s*([A-D])\s*[.、．]\s*(\S.*?)\s*\**$"),
+    re.compile(r"^答案[：:]\s*\**\s*([A-D]{1,4})\s*\**$"),
+    re.compile(r"^答案[：:]\s*\**\s*(正确|错误)\s*\**$"),
+]
+_NUMBERED_RE = re.compile(r"^(\d{1,2})\s*[.、．)]\s*(.+)$")
+
+
+def _clean_answer_line(line):
+    line = line.strip()
+    if not line:
+        return None
+    for r in _ANSWER_LINE_RES:
+        m = r.match(line)
+        if not m:
+            continue
+        g = m.groups()
+        if len(g) == 2 and g[0] in ("正确", "错误"):
+            return g[0]
+        if len(g) == 1:
+            v = g[0]
+            return "".join(sorted(set(v))) if re.fullmatch(r"[A-D]{2,4}", v) else v
+        if len(g) == 2:
+            if g[1] in ("正确", "错误"):
+                return "%s. %s" % (g[0], g[1])
+            return "%s. %s" % (g[0], g[1].strip())
+    return None
+
+
+def normalize_answer(text):
+    """把「纯选择题/判断题」的回答规范化；问答题、检索指引等原样返回。"""
+    if not text:
+        return text
+    t = text.strip()
+    if len(t) > 300:
+        return text
+    lines = [l for l in t.split("\n") if l.strip()]
+    if not lines or len(lines) > 6:
+        return text
+    out = []
+    for line in lines:
+        cleaned = _clean_answer_line(line)
+        if cleaned is not None:
+            out.append(cleaned)
+            continue
+        m = _NUMBERED_RE.match(line.strip())
+        if m:
+            inner = _clean_answer_line(m.group(2))
+            if inner is not None:
+                out.append("%s. %s" % (m.group(1), inner))
+                continue
+        return text
+    if not out:
+        return text
+    return "\n".join(out)
+
 
 def strip_tool_xml(text):
     if not text:
@@ -43,6 +104,9 @@ DEFAULT_SYSTEM_PROMPT = """你是屏幕答题助手，尤其擅长「AI + 信息
 3. 在拿到的内容里定位题目问的那个具体细节，逐一核对每个选项。题目问「数量/区间」时必须真的看到数字，不能估。
 4. 多选题必须逐项独立验证每个选项：能成立的都要选上，不要因为「这用法不常见」就排除。
 5. 计算题、逻辑题得出答案后要验算或回代检查一遍再输出。
+6. **判断题**：先把陈述拆开，涉及计算、字符位置、日期、数量、序号的必须实际算一遍再判断，
+   不要凭「看起来对」就答正确。例如 MID("APPLE",3,2) 要逐字符数：A(1) P(2) P(3) L(4) E(5)，
+   从第3位取2个得「PL」，若题干说结果是「PP」则该陈述错误。
 
 【PDF 文档】fetch_web 会自动解析 PDF 并标注每页（【第 N 页】），同时给出总页数。注意**页码偏移**：题目说「正文第 N 页」时，正文往往不是从 PDF 第 1 页开始（前面有封面、目录），要先找到正文起始页再换算，例如封面+目录占 2 页时，正文第14页 = PDF 第16页。
 
@@ -443,7 +507,7 @@ class VisionClient:
                     if on_stage:
                         on_stage("已获取资料，正在作答…")
 
-                final = strip_tool_xml(text)
+                final = normalize_answer(strip_tool_xml(text))
                 if not final and reasoning:
                     final = strip_tool_xml(reasoning)
                 if on_done:
