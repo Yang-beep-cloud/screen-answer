@@ -169,8 +169,15 @@ ScienceDirect、Wiley、UNESCO 数字图书馆、百度指数、智谱清言、A
 - **不要因为「这个站点看起来是公开的」就假定自己知道答案。**
   站点公开 ≠ 你一定抓到了那条信息。判断依据只能是「我这次实际抓到了吗」。
 
-唯一例外：题目考的是通用知识（Excel/Word/WPS 函数、检索语法、GB/T 7714
-文献类型标识、PubMed 字段标签等），不依赖特定数据库的实时数据，可以直接作答。
+唯一例外（可凭知识直接作答）：
+1. 通用工具知识：Excel/Word/WPS 函数与快捷键、检索语法与运算符、
+   GB/T 7714 文献类型标识、PubMed 字段标签、文献管理软件的基本用法等；
+2. 方法论与概念题：如何提高检索质量、AI 使用规范与学术伦理原则、
+   信息核验思路、不同 AI 工具的功能定位与差异辨析（如 Trust Card 与
+   Claim Radar 的用途区别、深度研究模式的作用）等；
+3. 这类题的正确答案来自确定的规则或原理，不依赖某个网站当天的具体内容，
+   因此**直接按知识判断即可，不必联网找证据**。
+   只有「某网站/数据库/文件里的具体数据、栏目名、页码、数量」才必须有抓到的原文依据。
 
 【输出选项字母前的最后自检（必做）】
 在给出任何选项字母之前，先问自己一句：
@@ -208,6 +215,11 @@ ScienceDirect、Wiley、UNESCO 数字图书馆、百度指数、智谱清言、A
    - 没查到依据、只是「看起来合理」或「比较常见」的选项**不要选**；
    - 也不要把「可能相关」当成「成立」，宁可少选也不臆选；
    - 逐项给出该选项成立的依据（在原文哪里看到的），再决定选不选。
+   **注意**：这里的「依据」对**通用知识题**来说就是你对函数/语法/规则的掌握，
+   例如 TEXT/LEFT/MID/VLOOKUP 的用法、检索运算符的含义、GB/T 7714 的标识，
+   属于确定的知识，**直接按知识判断即可，不必去联网找证据**，
+   也不要因为网上搜不到就否定它。
+   仅当题目依赖「某个网站/数据库/文件里的具体内容」时，才必须有抓取到的原文依据。
    **题干出现「包括哪些」「有哪些」「正确的有」「说法正确的是」等措辞、
    且选项之间不互斥时，很可能是多选**；若你判断成立的选项不止一个，
    必须全部输出，绝不能只输出一个字母。
@@ -414,6 +426,28 @@ TOOLS = [
                     "ref": {"type": "string", "description": "分支或 tag，如 main；可留空"},
                 },
                 "required": ["owner", "repo"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_and_read",
+            "description": (
+                "搜索并**自动抓取前几条结果的正文**，一次性拿到多个页面的内容。"
+                "当你不确定信息在哪个页面、或上一次只抓到一个空页/无关页时，用这个工具。"
+                "比先 search_web 再逐条 fetch_web 更省轮次、更不容易漏掉正确页面。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "检索关键词"},
+                    "count": {
+                        "type": "integer",
+                        "description": "抓取前几条结果的正文，默认 3，最多 5",
+                    },
+                },
+                "required": ["query"],
             },
         },
     },
@@ -643,6 +677,20 @@ class VisionClient:
             if not g["ok"]:
                 return "GitHub 查询失败：%s" % g["error"]
             return g["text"]
+        if name == "search_and_read":
+            q = (args.get("query") or "").strip()
+            if not q:
+                return "缺少 query"
+            try:
+                n = int(args.get("count") or 3)
+            except (TypeError, ValueError):
+                n = 3
+            if on_stage:
+                on_stage("正在搜索并抓取前 %d 条…" % n)
+            got = web_fetch.search_and_read(q, count=n)
+            if on_stage:
+                on_stage("已获取多页内容 %d 字" % len(got))
+            return got
         if name == "knowledge_lookup":
             q = (args.get("query") or "").strip()
             if on_stage:

@@ -1,5 +1,6 @@
 import hashlib
 import os
+import threading
 import re
 import shutil
 import subprocess
@@ -195,7 +196,32 @@ def _decode(resp):
         return resp.text
 
 
-def fetch(url, query="", max_chars=DEFAULT_PAGE_CHARS, timeout=25, render_fallback=True):
+def _get(url, timeout=25, total=25):
+    """带「硬性总超时」的 GET。
+
+    requests 的 timeout 只限制单次连接/读取；服务端慢慢滴数据时总耗时可无限延长。
+    这里用线程 + join(total) 保证总耗时不超过 total 秒。
+    """
+    box = {}
+
+    def work():
+        try:
+            box["r"] = requests.get(url, headers=HEADERS, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001
+            box["e"] = exc
+
+    th = threading.Thread(target=work, daemon=True)
+    th.start()
+    th.join(total)
+    if th.is_alive():
+        raise requests.Timeout("总耗时超过 %ds" % total)
+    if "e" in box:
+        raise box["e"]
+    return box["r"]
+
+
+def fetch(url, query="", max_chars=DEFAULT_PAGE_CHARS, timeout=25,
+          render_fallback=True, render_timeout=60, total_timeout=25):
     gh = github_from_url(url)
     if gh is not None:
         if gh.get("ok"):
@@ -217,7 +243,7 @@ def fetch(url, query="", max_chars=DEFAULT_PAGE_CHARS, timeout=25, render_fallba
                 return {"url": url, "ok": True, "error": None, "text": text,
                         "chars": len(text), "rendered": False}
     try:
-        r = requests.get(url, headers=HEADERS, timeout=timeout)
+        r = _get(url, timeout=timeout, total=total_timeout)
         r.raise_for_status()
         ctype = (r.headers.get("content-type") or "").lower()
         is_pdf = "pdf" in ctype or url.lower().split("?")[0].endswith(".pdf")
@@ -231,7 +257,7 @@ def fetch(url, query="", max_chars=DEFAULT_PAGE_CHARS, timeout=25, render_fallba
         html = _decode(r)
     except requests.RequestException as exc:
         if render_fallback:
-            rendered, err = render_with_browser(url, timeout=60)
+            rendered, err = render_with_browser(url, timeout=render_timeout)
             if rendered:
                 text = select_relevant(_strip_tags(rendered), query, max_chars)
                 return {"url": url, "ok": True, "error": None, "text": text,
@@ -244,7 +270,7 @@ def fetch(url, query="", max_chars=DEFAULT_PAGE_CHARS, timeout=25, render_fallba
         if len(main) < 400 and len(naive) > 1500:
             main = naive
         if render_fallback and _looks_js_required(main, html):
-            rendered, _err = render_with_browser(url, timeout=60)
+            rendered, _err = render_with_browser(url, timeout=render_timeout)
             if rendered:
                 rt = _strip_tags(rendered)
                 if len(rt) > len(main):
@@ -262,12 +288,19 @@ def fetch(url, query="", max_chars=DEFAULT_PAGE_CHARS, timeout=25, render_fallba
 
 
 def _looks_js_required(text, html):
-    if len(text) < 300:
-        return True
-    head = text[:600].lower()
-    if any(k in head for k in ("enable javascript", "请启用", "正在加载", "loading", "requires javascript")):
+    """判断是否真的需要渲染。
+
+    注意：页面正文短 ≠ 需要渲染。只有「HTML 很大但正文极少」或出现
+    「请启用 JavaScript」这类提示时，才值得花 20-40 秒去渲染。
+    """
+    head = (text or "")[:600].lower()
+    if any(k in head for k in ("enable javascript", "请启用", "正在加载",
+                               "requires javascript", "loading")):
         return True
     if len(html) > 40000 and len(text) < 800:
+        return True
+    # 正文几乎为空、但 HTML 有一定体量 → 很可能是 SPA 空壳
+    if len(text) < 120 and len(html) > 800:
         return True
     return False
 
@@ -371,7 +404,7 @@ def is_pubmed_url(url):
 
 def _pubmed_page_text(url, query, max_chars, timeout):
     try:
-        r = requests.get(url, headers=HEADERS, timeout=timeout)
+        r = _get(url, timeout=timeout, total=total_timeout)
         r.raise_for_status()
         html = _decode(r)
         main = extract_main(html, url)
@@ -453,3 +486,40 @@ def format_search_for_prompt(results, query):
     for i, r in enumerate(results, 1):
         lines.append("%d. %s\n   %s\n   %s" % (i, r["title"], r["url"], r["snippet"][:220]))
     return "\n".join(lines)
+
+
+def search_and_read(query, count=3, max_chars=8000, timeout=25):
+    """搜索并自动抓取前 N 条结果的正文（并行抓取，避免串行过慢）。
+
+    用于「搜到了结果但只抓了一个页面、恰好是空页」的情况。
+    """
+    import concurrent.futures as _cf
+
+    hits = search(query, max_results=max(1, min(count, 5)))
+    if not hits:
+        return "【搜索「%s」没有返回结果】" % query
+
+    results = [None] * len(hits)
+
+    def work(idx_hit):
+        idx, h = idx_hit
+        return idx, fetch(
+            h["url"], query=query, max_chars=max_chars, timeout=timeout,
+            render_timeout=35,
+        )
+
+    with _cf.ThreadPoolExecutor(max_workers=len(hits)) as ex:
+        for idx, r in ex.map(work, list(enumerate(hits))):
+            results[idx] = r
+
+    blocks = ["【搜索「%s」并抓取前 %d 条结果】" % (query, len(hits))]
+    for i, (h, r) in enumerate(zip(hits, results), 1):
+        blocks.append(
+            "\n=== 结果 %d ===\n标题：%s\n网址：%s" % (i, h["title"], h["url"])
+        )
+        if r and r["ok"] and r["text"]:
+            blocks.append("正文（%d 字%s）：\n%s" % (
+                r["chars"], "，已渲染" if r.get("rendered") else "", r["text"]))
+        else:
+            blocks.append("抓取失败：%s" % ((r or {}).get("error") or "内容为空"))
+    return "\n".join(blocks)
