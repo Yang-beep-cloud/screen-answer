@@ -18,9 +18,9 @@ _ANSWER_LINE_RES = [
     re.compile(r"^\**\s*([A-D])\s*[.、．]\s*(\S.*?)\s*\**$"),
     re.compile(r"^\**\s*([A-D])\s*\**$"),
     re.compile(r"^\**\s*(正确|错误)\s*\**$"),
-    re.compile(r"^答案[：:]\s*\**\s*([A-D])\s*[.、．]\s*(\S.*?)\s*\**$"),
-    re.compile(r"^答案[：:]\s*\**\s*([A-D]{1,4})\s*\**$"),
-    re.compile(r"^答案[：:]\s*\**\s*(正确|错误)\s*\**$"),
+    re.compile(r"^\**\s*答案[：:]\s*\**\s*([A-D])\s*[.、．]\s*(\S.*?)\s*\**$"),
+    re.compile(r"^\**\s*答案[：:]\s*\**\s*([A-D]{1,4})\s*\**$"),
+    re.compile(r"^\**\s*答案[：:]\s*\**\s*(正确|错误)\s*\**$"),
 ]
 _NUMBERED_RE = re.compile(r"^(\d{1,2})\s*[.、．)]\s*(.+)$")
 
@@ -56,6 +56,17 @@ def normalize_answer(text):
     lines = [l for l in t.split("\n") if l.strip()]
     if not lines or len(lines) > 6:
         return text
+
+    # 首行就是干净答案、后面却跟着解释 → 只保留答案
+    first = _clean_answer_line(lines[0])
+    if first is not None and len(lines) > 1:
+        rest_are_answers = all(
+            _clean_answer_line(l) is not None or _NUMBERED_RE.match(l.strip())
+            for l in lines[1:]
+        )
+        if not rest_are_answers:
+            return first
+
     out = []
     for line in lines:
         cleaned = _clean_answer_line(line)
@@ -382,54 +393,75 @@ class VisionClient:
         reasoning = []
         calls = {}
         finish = None
+        last_exc = None
 
-        with requests.post(
-            url, headers=headers, data=json.dumps(payload), stream=True, timeout=self.timeout
-        ) as resp:
-            if resp.status_code != 200:
-                raise LLMError("接口返回 %s: %s" % (resp.status_code, resp.text[:400]))
-            for raw in resp.iter_lines(decode_unicode=True):
+        for attempt in range(3):
+            content = []
+            reasoning = []
+            calls = {}
+            finish = None
+            try:
+                with requests.post(
+                    url, headers=headers, data=json.dumps(payload),
+                    stream=True, timeout=self.timeout,
+                ) as resp:
+                    if resp.status_code != 200:
+                        raise LLMError("接口返回 %s: %s" % (resp.status_code, resp.text[:400]))
+                    for raw in resp.iter_lines(decode_unicode=True):
+                        if stop_event is not None and stop_event.is_set():
+                            break
+                        if not raw:
+                            continue
+                        line = raw.strip()
+                        if line.startswith("data:"):
+                            line = line[5:].strip()
+                        if line == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        choices = chunk.get("choices") or []
+                        if not choices:
+                            continue
+                        choice = choices[0]
+                        if choice.get("finish_reason"):
+                            finish = choice["finish_reason"]
+                        delta = choice.get("delta") or {}
+                        if delta.get("reasoning_content"):
+                            reasoning.append(delta["reasoning_content"])
+                            if on_reasoning:
+                                on_reasoning("".join(reasoning))
+                        for tc in delta.get("tool_calls") or []:
+                            idx = tc.get("index", 0)
+                            entry = calls.setdefault(
+                                idx, {"id": "", "name": "", "arguments": ""})
+                            if tc.get("id"):
+                                entry["id"] = tc["id"]
+                            fn = tc.get("function") or {}
+                            if fn.get("name"):
+                                entry["name"] += fn["name"]
+                            if fn.get("arguments"):
+                                entry["arguments"] += fn["arguments"]
+                        piece = delta.get("content")
+                        if piece is None:
+                            piece = (choice.get("message") or {}).get("content")
+                        if piece:
+                            content.append(piece)
+                            if on_delta:
+                                on_delta("".join(content))
+                last_exc = None
+                break
+            except LLMError:
+                raise
+            except (requests.RequestException, ConnectionError, OSError) as exc:
+                last_exc = exc
                 if stop_event is not None and stop_event.is_set():
                     break
-                if not raw:
-                    continue
-                line = raw.strip()
-                if line.startswith("data:"):
-                    line = line[5:].strip()
-                if line == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                choices = chunk.get("choices") or []
-                if not choices:
-                    continue
-                choice = choices[0]
-                if choice.get("finish_reason"):
-                    finish = choice["finish_reason"]
-                delta = choice.get("delta") or {}
-                if delta.get("reasoning_content"):
-                    reasoning.append(delta["reasoning_content"])
-                    if on_reasoning:
-                        on_reasoning("".join(reasoning))
-                for tc in delta.get("tool_calls") or []:
-                    idx = tc.get("index", 0)
-                    entry = calls.setdefault(idx, {"id": "", "name": "", "arguments": ""})
-                    if tc.get("id"):
-                        entry["id"] = tc["id"]
-                    fn = tc.get("function") or {}
-                    if fn.get("name"):
-                        entry["name"] += fn["name"]
-                    if fn.get("arguments"):
-                        entry["arguments"] += fn["arguments"]
-                piece = delta.get("content")
-                if piece is None:
-                    piece = (choice.get("message") or {}).get("content")
-                if piece:
-                    content.append(piece)
-                    if on_delta:
-                        on_delta("".join(content))
+                time.sleep(2 + attempt * 3)
+
+        if last_exc is not None:
+            raise LLMError("网络中断（已自动重试 3 次）：%s" % last_exc)
 
         tool_calls = [calls[k] for k in sorted(calls)]
         return "".join(content).strip(), "".join(reasoning).strip(), finish, tool_calls
