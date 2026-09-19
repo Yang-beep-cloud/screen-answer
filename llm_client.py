@@ -288,6 +288,12 @@ CNKI 中国法律智库 lawpro.cnki.net、CNKI 中国学术会议网 conf.cnki.n
 - Excel VLOOKUP：第1参数=查找值，第2参数=查找范围（必须包含查找值与返回值列），
   第3参数=返回值在范围内的相对列号，第4参数=FALSE 表示精确匹配
 - QQ 截图工具栏：A = 添加文本（另有马赛克、长截图、钉在桌面等）
+- Zotero「通过标识符添加条目」(Add Item by Identifier) 支持的标识符**只有**：
+  **DOI、ISBN、PubMed ID(PMID)、arXiv ID、ADS Bibcode**。
+  **不支持 ISSN**、不支持 CNKI 链接、不支持标题（官方支持页原文列举）。
+  这属于确定的功能规则，直接按此判断，不要联网搜（搜到的二手教程常把 ISSN 也列进去）。
+- Zotero 导入题录方式：DOI/标识符、数据库检索、本地 PDF 拖入、RIS/BibTeX 题录文件
+- Mendeley / 知网研学 同样支持 DOI、RIS/BibTeX 导入
 
 【其它检索常识】
 - 百度高级语法：filetype:PDF 限定文献类型、site:域名 限定来源网站（域名不带 http://）；

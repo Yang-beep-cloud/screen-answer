@@ -59,6 +59,86 @@ def _strip_tags(html):
     return "\n".join(ln.strip() for ln in text.split("\n") if ln.strip())
 
 
+def _host(u):
+    h = (urlparse(u).netloc or "").lower()
+    if ":" in h:
+        h = h.split(":")[0]
+    if h.startswith("www."):
+        h = h[4:]
+    return h
+
+
+def _same_site(u1, u2):
+    h1, h2 = _host(u1), _host(u2)
+    return bool(h1) and h1 == h2
+
+
+def _soft_redirect_note(requested, final):
+    """检测「请求的路径不存在 → 服务器重定向到首页」这类软 404。
+
+    这类站点对任意不存在的路径都回首页（HTTP 200），若不提醒，
+    模型会误以为抓到了目标栏目页，从而基于错误内容作答。
+    """
+    if not final or final == requested:
+        return ""
+    rp, fp = urlparse(requested), urlparse(final)
+    req_path = (rp.path or "/").strip()
+    fin_path = (fp.path or "/").strip()
+    if not _same_site(requested, final):
+        return ("\n⚠️ 注意：该网址被重定向到了**其它站点** %s，"
+                "你抓到的不是请求的那个站点的内容。" % final)
+    roots = ("", "/", "/index.htm", "/index.html", "/index.php", "/default.html")
+    if req_path not in roots and fin_path in roots:
+        return ("\n⚠️ 注意：请求的路径「%s」**不存在**，服务器把页面重定向到了网站首页"
+                "（实际打开的是 %s）。你抓到的**不是**目标栏目页，"
+                "不要把它当成目标页面的内容，请改用本页链接列表里的真实地址。"
+                % (rp.path, final))
+    if req_path != fin_path:
+        return "\n⚠️ 注意：该网址被重定向到 %s（实际打开的是这个地址）。" % final
+    return ""
+
+
+A_RE = re.compile(r"<a\s[^>]*href\s*=\s*[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+                  re.DOTALL | re.IGNORECASE)
+
+
+def extract_nav_links(html, base_url, limit=45):
+    """抽出页面里的同站链接（文字 → 绝对地址）。
+
+    很多站点的栏目真实地址与猜测不符（如 piyao.org.cn 的辟谣访谈是 /ft.htm
+    而不是 /pyft/）。给出本页链接，模型才能导航到正确的栏目页/文章页。
+    """
+    from urllib.parse import urljoin
+
+    out, seen = [], set()
+    for m in A_RE.finditer(html or ""):
+        href, inner = m.group(1).strip(), m.group(2)
+        if not href or href.startswith(("javascript:", "#", "mailto:", "tel:")):
+            continue
+        text = re.sub(r"\s+", " ", ANY_TAG.sub("", inner)).strip()
+        if not text or len(text) > 60:
+            continue
+        try:
+            full = urljoin(base_url, href)
+        except (ValueError, TypeError):
+            continue
+        if not full.startswith("http") or not _same_site(base_url, full):
+            continue
+        key = (text, full)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((text, full))
+        if len(out) >= limit:
+            break
+    if not out:
+        return ""
+    lines = ["\n【本页可点的同站链接（想找栏目页/文章页时用这里的真实地址）】"]
+    for text, full in out:
+        lines.append("- %s → %s" % (text, full))
+    return "\n".join(lines)
+
+
 def extract_main(html, url=""):
     if trafilatura is not None:
         try:
@@ -256,6 +336,14 @@ def fetch(url, query="", max_chars=DEFAULT_PAGE_CHARS, timeout=25,
             return {"url": url, "ok": False, "error": "PDF 解析失败", "text": "", "chars": 0}
         html = _decode(r)
     except requests.RequestException as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        # 404/410 表示路径本身不存在：渲染也没用，而且很多站点会返回一个
+        # 长得像首页的 404 页面，渲染后会被误当成目标页内容（软 404 陷阱）。
+        if status in (404, 410):
+            return {"url": url, "ok": False, "text": "", "chars": 0,
+                    "error": "HTTP %d 页面不存在——该路径无效，"
+                             "不要把它当作目标栏目页；请改用首页链接列表里的真实地址，"
+                             "或换一个网址再试。" % status}
         if render_fallback:
             rendered, err = render_with_browser(url, timeout=render_timeout)
             if rendered:
@@ -263,6 +351,10 @@ def fetch(url, query="", max_chars=DEFAULT_PAGE_CHARS, timeout=25,
                 return {"url": url, "ok": True, "error": None, "text": text,
                         "chars": len(text), "rendered": True}
         return {"url": url, "ok": False, "error": str(exc), "text": "", "chars": 0}
+
+    notes = _soft_redirect_note(url, r.url)
+    links = extract_nav_links(html, r.url or url)
+    suffix = notes + ("\n" + links if links else "")
 
     if "html" in ctype or "xml" in ctype or not ctype:
         main = extract_main(html, url)
@@ -275,14 +367,16 @@ def fetch(url, query="", max_chars=DEFAULT_PAGE_CHARS, timeout=25,
                 rt = _strip_tags(rendered)
                 if len(rt) > len(main):
                     main = rt
-                    text = select_relevant(main, query, max_chars)
+                    rlinks = extract_nav_links(rendered, r.url or url)
+                    rsuffix = notes + ("\n" + rlinks if rlinks else "")
+                    text = select_relevant(main, query, max_chars) + rsuffix
                     return {"url": url, "ok": True, "error": None, "text": text,
                             "chars": len(text), "rendered": True}
         text = main
     else:
         text = r.text
 
-    text = select_relevant(text, query, max_chars)
+    text = select_relevant(text, query, max_chars) + suffix
     return {"url": url, "ok": True, "error": None, "text": text, "chars": len(text),
             "rendered": False}
 
