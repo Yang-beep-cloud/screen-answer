@@ -1,6 +1,7 @@
 import hashlib
 import os
 import threading
+import time
 import re
 import shutil
 import subprocess
@@ -318,8 +319,9 @@ def fetch(url, query="", max_chars=DEFAULT_PAGE_CHARS, timeout=25,
                     "【PubMed 精确命中数】%s 篇\n检索式：%s\n翻译后：%s\n\n"
                     % (res["count"], term, res.get("translation", ""))
                 )
-                text = select_relevant(head + _pubmed_page_text(url, query, max_chars, timeout),
-                                      query, max_chars)
+                text = select_relevant(
+                    head + _pubmed_page_text(url, query, max_chars, timeout, total_timeout),
+                    query, max_chars)
                 return {"url": url, "ok": True, "error": None, "text": text,
                         "chars": len(text), "rendered": False}
     try:
@@ -348,8 +350,15 @@ def fetch(url, query="", max_chars=DEFAULT_PAGE_CHARS, timeout=25,
             rendered, err = render_with_browser(url, timeout=render_timeout)
             if rendered:
                 text = select_relevant(_strip_tags(rendered), query, max_chars)
+                if _looks_like_challenge(text):
+                    return {"url": url, "ok": False, "text": "", "chars": 0,
+                            "error": CHALLENGE_ERROR}
                 return {"url": url, "ok": True, "error": None, "text": text,
                         "chars": len(text), "rendered": True}
+        if status is not None:
+            return {"url": url, "ok": False, "text": "", "chars": 0,
+                    "error": "HTTP %d —— 该页无法抓取（可能需要登录或已被限制）。"
+                             "不要把它当作已抓到的正文，请换来源或输出检索指引。" % status}
         return {"url": url, "ok": False, "error": str(exc), "text": "", "chars": 0}
 
     notes = _soft_redirect_note(url, r.url)
@@ -370,6 +379,9 @@ def fetch(url, query="", max_chars=DEFAULT_PAGE_CHARS, timeout=25,
                     rlinks = extract_nav_links(rendered, r.url or url)
                     rsuffix = notes + ("\n" + rlinks if rlinks else "")
                     text = select_relevant(main, query, max_chars) + rsuffix
+                    if _looks_like_challenge(text):
+                        return {"url": url, "ok": False, "text": "", "chars": 0,
+                                "error": CHALLENGE_ERROR}
                     return {"url": url, "ok": True, "error": None, "text": text,
                             "chars": len(text), "rendered": True}
         text = main
@@ -377,8 +389,43 @@ def fetch(url, query="", max_chars=DEFAULT_PAGE_CHARS, timeout=25,
         text = r.text
 
     text = select_relevant(text, query, max_chars) + suffix
+    if _looks_like_challenge(text):
+        return {"url": url, "ok": False, "text": "", "chars": 0,
+                "error": CHALLENGE_ERROR}
     return {"url": url, "ok": True, "error": None, "text": text, "chars": len(text),
             "rendered": False}
+
+
+CHALLENGE_MARKS = (
+    "just a moment", "正在进行安全验证", "请稍候", "checking your browser",
+    "enable javascript and cookies to continue", "cf-challenge",
+    "cf_chl_opt", "cloudflare", "attention required",
+    "verify you are human", "验证您不是自动程序", "安全服务防护恶意自动程序",
+    "ddos protection", "access denied", "请求被拦截",
+    "incapsula", "incident id", "request unsuccessful",
+    "imperva", "请开启 javascript", "captcha",
+    "403 forbidden", "401 unauthorized", "429 too many requests",
+)
+
+
+CHALLENGE_ERROR = (
+    "该站点有反爬验证（Cloudflare「安全验证」页），程序无法自动通过。"
+    "不要把它当作已抓到的正文，请改用其它来源，或按系统提示词输出检索指引。"
+)
+
+
+def _looks_like_challenge(text):
+    """判断抓到的是不是反爬验证页（Cloudflare「Just a moment」等）。
+
+    这类页面 HTTP 200、正文很短，若不识别会被当成正文交给模型，
+    让模型以为「已经抓到目标页面」，从而基于验证页内容瞎答。
+    """
+    t = (text or "").strip()
+    if not t or len(t) > 1200:
+        return False
+    low = t.lower()
+    hit = sum(1 for m in CHALLENGE_MARKS if m in low)
+    return hit >= 1
 
 
 def _looks_js_required(text, html):
@@ -496,7 +543,7 @@ def is_pubmed_url(url):
     return "pubmed.ncbi.nlm.nih.gov" in (url or "")
 
 
-def _pubmed_page_text(url, query, max_chars, timeout):
+def _pubmed_page_text(url, query, max_chars, timeout, total_timeout=25):
     try:
         r = _get(url, timeout=timeout, total=total_timeout)
         r.raise_for_status()
@@ -504,7 +551,7 @@ def _pubmed_page_text(url, query, max_chars, timeout):
         main = extract_main(html, url)
         naive = _strip_tags(html)
         return naive if len(main) < 400 and len(naive) > 1500 else main
-    except requests.RequestException:
+    except Exception:  # noqa: BLE001 - 辅助抓取失败不应影响主流程
         return ""
 
 
@@ -547,17 +594,190 @@ def format_for_prompt(results):
     return "\n\n".join(chunks)
 
 
+def openalex_doi(title, timeout=20):
+    """用 OpenAlex 按标题找 DOI。
+
+    OpenAlex 的标题匹配比 Crossref 可靠得多（实测 Crossref 连
+    「eDoctor: machine learning and the future of medicine」都搜不到，
+    OpenAlex 第一条就命中 10.1111/joim.12822）。
+    """
+    try:
+        r = requests.get(
+            "https://api.openalex.org/works",
+            params={"search": title, "per-page": 5,
+                    "select": "doi,title,publication_year"},
+            headers=HEADERS, timeout=timeout)
+        r.raise_for_status()
+        items = r.json().get("results") or []
+    except Exception:  # noqa: BLE001
+        return None, ""
+    if not items:
+        return None, ""
+    # 优先选标题与查询高度重合的那条，避免拿错文献
+    want = _query_tokens(title)
+    best, best_score = None, 0.0
+    for it in items:
+        t = it.get("title") or ""
+        got = _query_tokens(t)
+        if not got:
+            continue
+        score = len(want & got) / float(len(want) or 1)
+        if score > best_score:
+            best, best_score = it, score
+    if best is None or best_score < 0.5:
+        return None, ""
+    doi = (best.get("doi") or "").replace("https://doi.org/", "")
+    return (doi or None), (best.get("title") or "")
+
+
+def _unpaywall_pdfs(doi, timeout=20):
+    """Unpaywall：免费、无需 key，返回该 DOI 的所有 OA 位置。"""
+    out = []
+    try:
+        r = requests.get("https://api.unpaywall.org/v2/%s" % doi,
+                         params={"email": "oa-lookup@example.com"},
+                         headers=HEADERS, timeout=timeout)
+        if r.status_code != 200:
+            return out
+        d = r.json()
+        for loc in [d.get("best_oa_location")] + (d.get("oa_locations") or []):
+            if not loc:
+                continue
+            u = loc.get("url_for_pdf") or loc.get("url")
+            if u and u not in out:
+                out.append(u)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _openalex_pdfs(doi, timeout=20):
+    out = []
+    try:
+        r = requests.get("https://api.openalex.org/works/doi:%s" % doi,
+                         headers=HEADERS, timeout=timeout)
+        if r.status_code != 200:
+            return out
+        for loc in (r.json().get("locations") or []):
+            u = loc.get("pdf_url")
+            if u and u not in out:
+                out.append(u)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _core_pdfs(doi=None, title=None, timeout=25, tries=4):
+    """CORE：副本最全，但免费接口限流很紧（约 10 次/窗口，会 429）。"""
+    q = 'doi:"%s"' % doi if doi else 'title:"%s"' % title
+    out = []
+    for attempt in range(tries):
+        try:
+            r = requests.get("https://api.core.ac.uk/v3/search/works",
+                             params={"q": q, "limit": 3},
+                             headers=HEADERS, timeout=timeout)
+            if r.status_code == 429:
+                time.sleep(5 + attempt * 8)
+                continue
+            if r.status_code != 200:
+                return out
+            for w in (r.json().get("results") or []):
+                dl = w.get("downloadUrl")
+                if dl and dl not in out:
+                    out.append(dl)
+            return out
+        except Exception:  # noqa: BLE001
+            time.sleep(4)
+    return out
+
+
+def oa_pdf_candidates(doi=None, title=None):
+    """汇总多个 OA 来源的 PDF 候选地址（Unpaywall → OpenAlex → CORE）。
+
+    单靠 CORE 不可靠：免费接口限流很紧，实测连发 6 次就有 1 次 429、
+    还有单次 22.9 秒的慢响应，会导致本来能答的题退化成给指引。
+    """
+    urls = []
+    if doi:
+        for fn in (_unpaywall_pdfs, _openalex_pdfs):
+            for u in fn(doi):
+                if u not in urls:
+                    urls.append(u)
+    for u in _core_pdfs(doi=doi, title=title):
+        if u not in urls:
+            urls.append(u)
+    return urls
+
+
+def oa_fulltext(doi=None, title=None, max_chars=60000, timeout=30):
+    """按 DOI/标题找到论文的开放获取全文并解析成文本。
+
+    返回 (text, note)；text 为空时 note 说明失败原因。
+    """
+    if not doi and title:
+        doi, found = openalex_doi(title)
+        if not doi:
+            return "", "OpenAlex 没找到这篇文献的 DOI（标题可能有出入，可先用 search_web 核实标题）。"
+    if not doi:
+        return "", "需要提供 DOI 或准确的文献标题。"
+    urls = oa_pdf_candidates(doi=doi)
+    if not urls:
+        return "", ("没有找到这篇文献的开放获取副本（DOI: %s）。"
+                    "该文献可能需要通过机构订阅获取，请输出检索指引。" % doi)
+    tried = []
+    for url in urls[:6]:
+        try:
+            r = _get(url, timeout=timeout, total=timeout)
+            r.raise_for_status()
+        except requests.RequestException as exc:
+            tried.append("%s → %s" % (url[:60], type(exc).__name__))
+            continue
+        if r.content[:4] == b"%PDF":
+            text = extract_pdf(r.content)
+            if text:
+                return text[:max_chars], "已获取 OA 全文 PDF（DOI: %s）" % doi
+            tried.append("%s → PDF 解析失败" % url[:60])
+            continue
+        res = fetch(url, max_chars=max_chars, timeout=timeout, total_timeout=timeout)
+        if res["ok"] and res["text"]:
+            return res["text"], "已获取 OA 全文页面（DOI: %s）" % doi
+        tried.append("%s → %s" % (url[:60], (res.get("error") or "空")[:40]))
+    return "", "找到 %d 个 OA 副本但都抓不到：%s" % (len(urls), "；".join(tried[:3]))
+
+
 SEARCH_URL = "https://cn.bing.com/search"
 
 
+_STOP = {
+    "the", "and", "for", "with", "that", "this", "from", "are", "was", "were",
+    "http", "https", "www", "com", "org", "net", "html", "htm", "php",
+}
+
+
+def _query_tokens(query):
+    return {t.lower() for t in re.findall(r"[A-Za-z0-9_]{3,}|[\u4e00-\u9fff]{2,}", query or "")
+            if t.lower() not in _STOP}
+
+
 def search(query, max_results=8, timeout=20):
+    """Bing 搜索。
+
+    注意：Bing 在「零结果」时**不输出 sb_count**，但页面里仍会有 10 个
+    b_algo 块，内容是「测网速」之类的无关填充。若直接解析这些块，
+    模型会拿到与题目毫无关系的「搜索结果」并据此推理，后果严重。
+    因此这里加两道闸：(1) 没有 sb_count 视为无结果；
+    (2) 结果与查询词零重叠也视为无结果。
+    """
     try:
         r = requests.get(SEARCH_URL, headers=HEADERS, params={"q": query}, timeout=timeout)
         r.raise_for_status()
     except requests.RequestException:
         return []
+    html = r.text
+    if "sb_count" not in html:
+        return []
     out = []
-    for block in re.findall(r'<li class="b_algo".*?</li>', r.text, re.S):
+    for block in re.findall(r'<li class="b_algo".*?</li>', html, re.S):
         m = re.search(r'<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', block, re.S)
         if not m:
             continue
@@ -570,6 +790,11 @@ def search(query, max_results=8, timeout=20):
         out.append({"title": title, "url": url, "snippet": snippet})
         if len(out) >= max_results:
             break
+    toks = _query_tokens(query)
+    if toks and out:
+        blob = " ".join((x["title"] + " " + x["snippet"] + " " + x["url"]) for x in out).lower()
+        if not any(t in blob for t in toks):
+            return []
     return out
 
 

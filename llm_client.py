@@ -208,6 +208,10 @@ ScienceDirect、Wiley、UNESCO 数字图书馆、百度指数、智谱清言、A
    - fetch_web：抓取网页正文（会自动处理 JS 渲染的页面；PubMed 检索页会自动给出精确命中数）
    - pubmed_search：题目问「PubMed 检索结果多少篇」时用这个，返回官方精确数字
    - github_files：题目问「GitHub 某仓库某文件夹有几个文件」时用这个，返回官方精确清单
+   - oa_fulltext：题目问**某篇文献的图表/页码/作者/结论**等正文细节时用这个。
+     它按标题或 DOI 自动找开放获取全文（Wiley、Elsevier 等出版商站点被
+     Cloudflare 拦住时依然有效，因为走的是机构仓库副本）。
+     **不要因为出版商站点抓不到就直接放弃给指引，先用 oa_fulltext 试一次。**
    可多轮调用，直到信息足够。
 3. 在拿到的内容里定位题目问的那个具体细节，逐一核对每个选项。题目问「数量/区间」时必须真的看到数字，不能估。
 4. 多选题必须逐项独立验证，**只选有明确依据的选项**：
@@ -432,6 +436,24 @@ TOOLS = [
                     "ref": {"type": "string", "description": "分支或 tag，如 main；可留空"},
                 },
                 "required": ["owner", "repo"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "oa_fulltext",
+            "description": (
+                "获取一篇论文的**开放获取全文**（自动走 OpenAlex 查 DOI → CORE 找 OA 副本 → 解析 PDF）。"
+                "题目问某篇文献的图/表/第几页/作者/结论，而出版商站点被反爬拦住（Wiley、Elsevier 等）时，"
+                "用这个工具往往能直接拿到全文正文。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "文献标题（不确定 DOI 时用这个）"},
+                    "doi": {"type": "string", "description": "文献 DOI（已知时优先用这个）"},
+                },
             },
         },
     },
@@ -683,6 +705,19 @@ class VisionClient:
             if not g["ok"]:
                 return "GitHub 查询失败：%s" % g["error"]
             return g["text"]
+        if name == "oa_fulltext":
+            doi = (args.get("doi") or "").strip()
+            title = (args.get("title") or "").strip()
+            if not doi and not title:
+                return "缺少 doi 或 title"
+            if on_stage:
+                on_stage("正在找文献 OA 全文：%s" % (doi or title)[:40])
+            text, note = web_fetch.oa_fulltext(doi=doi or None, title=title or None)
+            if on_stage:
+                on_stage("文献全文 %d 字" % len(text))
+            if not text:
+                return "【未能获取该文献全文】%s" % note
+            return "【%s】\n%s" % (note, text)
         if name == "search_and_read":
             q = (args.get("query") or "").strip()
             if not q:
