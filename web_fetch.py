@@ -349,10 +349,11 @@ def fetch(url, query="", max_chars=DEFAULT_PAGE_CHARS, timeout=25,
         if render_fallback:
             rendered, err = render_with_browser(url, timeout=render_timeout)
             if rendered:
-                text = select_relevant(_strip_tags(rendered), query, max_chars)
-                if _looks_like_challenge(text):
+                raw = _strip_tags(rendered)
+                if _looks_like_challenge(raw):
                     return {"url": url, "ok": False, "text": "", "chars": 0,
                             "error": CHALLENGE_ERROR}
+                text = select_relevant(raw, query, max_chars)
                 return {"url": url, "ok": True, "error": None, "text": text,
                         "chars": len(text), "rendered": True}
         if status is not None:
@@ -378,39 +379,66 @@ def fetch(url, query="", max_chars=DEFAULT_PAGE_CHARS, timeout=25,
                     main = rt
                     rlinks = extract_nav_links(rendered, r.url or url)
                     rsuffix = notes + ("\n" + rlinks if rlinks else "")
-                    text = select_relevant(main, query, max_chars) + rsuffix
-                    if _looks_like_challenge(text):
+                    if _looks_like_challenge(main):
                         return {"url": url, "ok": False, "text": "", "chars": 0,
                                 "error": CHALLENGE_ERROR}
+                    text = select_relevant(main, query, max_chars) + rsuffix
                     return {"url": url, "ok": True, "error": None, "text": text,
                             "chars": len(text), "rendered": True}
         text = main
     else:
         text = r.text
 
-    text = select_relevant(text, query, max_chars) + suffix
     if _looks_like_challenge(text):
         return {"url": url, "ok": False, "text": "", "chars": 0,
                 "error": CHALLENGE_ERROR}
+    text = select_relevant(text, query, max_chars) + suffix
     return {"url": url, "ok": True, "error": None, "text": text, "chars": len(text),
             "rendered": False}
 
 
-CHALLENGE_MARKS = (
-    "just a moment", "正在进行安全验证", "请稍候", "checking your browser",
-    "enable javascript and cookies to continue", "cf-challenge",
-    "cf_chl_opt", "cloudflare", "attention required",
-    "verify you are human", "验证您不是自动程序", "安全服务防护恶意自动程序",
-    "ddos protection", "access denied", "请求被拦截",
-    "incapsula", "incident id", "request unsuccessful",
-    "imperva", "请开启 javascript", "captcha",
+# 强标记：出现任意一个就基本可断定是验证页
+STRONG_CHALLENGE = (
+    "just a moment",
+    "cf-chl", "cf_chl_opt", "cf-challenge",
+    "checking your browser",
+    "enable javascript and cookies to continue",
+    "正在进行安全验证",
+    "安全服务防护恶意自动程序",
+    "验证您不是自动程序",
+    "incapsula incident",
+    "request unsuccessful. incapsula",
+    "由 cloudflare 提供",
+    "attention required! | cloudflare",
+    # 「浏览器版本过低/请升级」这类拦截页：站点只回了导航外壳与升级提示，
+    # 没有实际正文（实测万方详情页会这样），必须识别出来，
+    # 否则模型会拿导航文字当正文，甚至从 URL 里的 periodical 猜出 [J]。
+    "浏览器版本过低",
+    "建议您下载",
+    "请升级浏览器",
+    "升级浏览器至",
+    "upgrade your browser",
+    "unsupported browser",
+    "browser is not supported",
+    "your browser is out of date",
+)
+
+# 弱标记：单独出现不足以判定（正常页面也会提到 captcha、请稍候、
+# access denied 等词，例如 CNKI 帮助页就会写「滑块验证码 captchaType=...」，
+# 误判会让本来能抓的页面被拒掉）。需要命中 2 个以上才算验证页。
+WEAK_CHALLENGE = (
+    "cloudflare", "captcha", "请稍候", "access denied",
     "403 forbidden", "401 unauthorized", "429 too many requests",
+    "incident id", "verify you are human", "ddos protection",
+    "imperva", "请开启 javascript", "请求被拦截", "ray id",
 )
 
 
 CHALLENGE_ERROR = (
-    "该站点有反爬验证（Cloudflare「安全验证」页），程序无法自动通过。"
-    "不要把它当作已抓到的正文，请改用其它来源，或按系统提示词输出检索指引。"
+    "抓到的不是正文，而是站点的拦截页（反爬验证 / 浏览器版本过低提示 / 访问受限）。"
+    "程序无法自动通过，页面上也没有题目要的内容。"
+    "**不要根据网址或导航文字猜测答案**，请改用其它来源，"
+    "或按系统提示词输出检索指引。"
 )
 
 
@@ -419,13 +447,17 @@ def _looks_like_challenge(text):
 
     这类页面 HTTP 200、正文很短，若不识别会被当成正文交给模型，
     让模型以为「已经抓到目标页面」，从而基于验证页内容瞎答。
+
+    但也要避免误报：正常页面也可能出现 captcha、请稍候 等词。
+    故强标记命中 1 个即可，弱标记需命中 2 个以上。
     """
     t = (text or "").strip()
-    if not t or len(t) > 1200:
+    if not t or len(t) > 1000:
         return False
     low = t.lower()
-    hit = sum(1 for m in CHALLENGE_MARKS if m in low)
-    return hit >= 1
+    if any(m in low for m in STRONG_CHALLENGE):
+        return True
+    return sum(1 for m in WEAK_CHALLENGE if m in low) >= 2
 
 
 def _looks_js_required(text, html):
@@ -709,9 +741,11 @@ def oa_pdf_candidates(doi=None, title=None):
     return urls
 
 
-def oa_fulltext(doi=None, title=None, max_chars=60000, timeout=30):
+def oa_fulltext(doi=None, title=None, query="", max_chars=60000, timeout=30):
     """按 DOI/标题找到论文的开放获取全文并解析成文本。
 
+    query 用于从长文档里挑出与题目相关的段落——整篇论文常超过 max_chars，
+    直接取前 N 字会把「图 5 的说明」这类位于后半篇的内容截掉。
     返回 (text, note)；text 为空时 note 说明失败原因。
     """
     if not doi and title:
@@ -724,6 +758,10 @@ def oa_fulltext(doi=None, title=None, max_chars=60000, timeout=30):
     if not urls:
         return "", ("没有找到这篇文献的开放获取副本（DOI: %s）。"
                     "该文献可能需要通过机构订阅获取，请输出检索指引。" % doi)
+
+    def pick(text):
+        return select_relevant(text, query, max_chars) if query else text[:max_chars]
+
     tried = []
     for url in urls[:6]:
         try:
@@ -732,10 +770,11 @@ def oa_fulltext(doi=None, title=None, max_chars=60000, timeout=30):
         except requests.RequestException as exc:
             tried.append("%s → %s" % (url[:60], type(exc).__name__))
             continue
-        if r.content[:4] == b"%PDF":
+        # 有些服务端会在 %PDF 前加空白/BOM，放宽魔数判断
+        if b"%PDF" in r.content[:1024]:
             text = extract_pdf(r.content)
             if text:
-                return text[:max_chars], "已获取 OA 全文 PDF（DOI: %s）" % doi
+                return pick(text), "已获取 OA 全文 PDF（DOI: %s）" % doi
             tried.append("%s → PDF 解析失败" % url[:60])
             continue
         res = fetch(url, max_chars=max_chars, timeout=timeout, total_timeout=timeout)

@@ -453,6 +453,13 @@ TOOLS = [
                 "properties": {
                     "title": {"type": "string", "description": "文献标题（不确定 DOI 时用这个）"},
                     "doi": {"type": "string", "description": "文献 DOI（已知时优先用这个）"},
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "你在找什么，如「Figure 5」「表2 的样本量」「结论」"
+                            "（论文很长，带上它能精准定位相关段落，强烈建议填）"
+                        ),
+                    },
                 },
             },
         },
@@ -578,12 +585,26 @@ class VisionClient:
                     stream=True, timeout=self.timeout,
                 ) as resp:
                     if resp.status_code != 200:
+                        # 401/403/400 是配置或请求本身的问题，重试没用；
+                        # 429/5xx 是暂时性故障，应重试。
+                        if resp.status_code in (408, 409, 425, 429) or resp.status_code >= 500:
+                            last_exc = LLMError(
+                                "接口返回 %s: %s" % (resp.status_code, resp.text[:200]))
+                            time.sleep(2 + attempt * 3)
+                            continue
                         raise LLMError("接口返回 %s: %s" % (resp.status_code, resp.text[:400]))
-                    for raw in resp.iter_lines(decode_unicode=True):
+                    # 显式按 UTF-8 解码：iter_lines(decode_unicode=True) 依赖
+                    # 响应头里的 charset，若端点/代理没带 charset，requests 对
+                    # text/* 会默认 ISO-8859-1，中文会全部乱码。
+                    for raw_bytes in resp.iter_lines(decode_unicode=False):
                         if stop_event is not None and stop_event.is_set():
                             break
-                        if not raw:
+                        if not raw_bytes:
                             continue
+                        try:
+                            raw = raw_bytes.decode("utf-8")
+                        except UnicodeDecodeError:
+                            raw = raw_bytes.decode("utf-8", errors="replace")
                         line = raw.strip()
                         if line.startswith("data:"):
                             line = line[5:].strip()
@@ -633,10 +654,33 @@ class VisionClient:
                 time.sleep(2 + attempt * 3)
 
         if last_exc is not None:
-            raise LLMError("网络中断（已自动重试 3 次）：%s" % last_exc)
+            raise LLMError("请求失败（已自动重试 3 次）：%s" % last_exc)
 
         tool_calls = [calls[k] for k in sorted(calls)]
         return "".join(content).strip(), "".join(reasoning).strip(), finish, tool_calls
+
+    @staticmethod
+    def _tool_result_failed(text):
+        """判断一次工具调用的结果是不是「没拿到东西」。"""
+        if not text:
+            return True
+        head = text.strip()[:220]
+        marks = ("抓取失败", "没有返回结果", "页面不存在", "拦截页", "无法自动通过",
+                 "未能获取", "查询失败", "接口调用失败", "缺少 ", "网址无效",
+                 "未知工具", "参数解析失败", "知识库为空", "PDF 解析失败")
+        return any(m in head for m in marks)
+
+    @staticmethod
+    def _looks_like_bare_answer(text):
+        """判断输出是不是「光秃秃的答案」——只有选项字母或正确/错误。"""
+        if not text:
+            return False
+        t = text.strip()
+        if len(t) > 40:
+            return False
+        return bool(re.fullmatch(r"\**\s*[A-D]{1,4}\s*\**", t)
+                    or re.fullmatch(r"\**\s*[A-D]\s*[.、．]\s*\S{1,20}\s*\**", t)
+                    or re.fullmatch(r"\**\s*(正确|错误)\s*\**", t))
 
     @staticmethod
     def _looks_like_guide(text):
@@ -712,7 +756,9 @@ class VisionClient:
                 return "缺少 doi 或 title"
             if on_stage:
                 on_stage("正在找文献 OA 全文：%s" % (doi or title)[:40])
-            text, note = web_fetch.oa_fulltext(doi=doi or None, title=title or None)
+            text, note = web_fetch.oa_fulltext(
+                doi=doi or None, title=title or None,
+                query=(args.get("query") or "").strip())
             if on_stage:
                 on_stage("文献全文 %d 字" % len(text))
             if not text:
@@ -756,6 +802,7 @@ class VisionClient:
                 text = reasoning = ""
                 finish = None
                 tool_used = False
+                usable_evidence = False
                 for round_no in range(self.web_max_rounds + 1):
                     last_round = round_no >= self.web_max_rounds
                     if last_round:
@@ -805,6 +852,8 @@ class VisionClient:
                     )
                     for i, c in enumerate(calls):
                         result = self._run_tool(c, on_stage)
+                        if not self._tool_result_failed(result):
+                            usable_evidence = True
                         messages.append(
                             {
                                 "role": "tool",
@@ -818,6 +867,70 @@ class VisionClient:
                 final = normalize_answer(strip_tool_xml(text))
                 if not final and reasoning:
                     final = strip_tool_xml(reasoning)
+
+                # 机械检查：调了工具但**每一次都没拿到东西**，却还给出光秃秃的
+                # 选项字母 → 属于无依据作答（实测万方拦截页会把模型带偏成
+                # 「从网址里的 periodical 猜 [J]」），强制重来一次。
+                if (tool_used and not usable_evidence
+                        and self._looks_like_bare_answer(final)):
+                    if on_stage:
+                        on_stage("未取得任何有效资料，正在重新核实…")
+                    messages.append({"role": "assistant", "content": final})
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "你刚才调用的工具**全部没有拿到有效内容**"
+                                "（返回的都是抓取失败/拦截页/无结果），"
+                                "但你还是直接给出了选项字母，这属于凭猜测作答。\n"
+                                "现在请二选一：\n"
+                                "1) 换用别的来源再试（换关键词、换站点、"
+                                "用 oa_fulltext 找文献全文、用 fetch_web 打开"
+                                "该站其它公开页面），**拿到能指认的具体原文**后再给答案；\n"
+                                "2) 确实拿不到，就按系统提示词输出【检索指引】。\n"
+                                "**绝对不要**根据网址、栏目名或印象猜选项。"
+                            ),
+                        }
+                    )
+                    text2, reasoning2, finish2, calls2 = self._stream_once(
+                        messages, on_delta, on_reasoning, stop_event, allow_tools=True
+                    )
+                    for _ in range(self.web_max_rounds):
+                        if not calls2:
+                            break
+                        messages.append(
+                            {
+                                "role": "assistant",
+                                "content": text2 or None,
+                                "tool_calls": [
+                                    {
+                                        "id": c["id"] or ("call_%d" % i),
+                                        "type": "function",
+                                        "function": {
+                                            "name": c["name"],
+                                            "arguments": c["arguments"] or "{}",
+                                        },
+                                    }
+                                    for i, c in enumerate(calls2)
+                                ],
+                            }
+                        )
+                        for i, c in enumerate(calls2):
+                            result2 = self._run_tool(c, on_stage)
+                            if not self._tool_result_failed(result2):
+                                usable_evidence = True
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": c["id"] or ("call_%d" % i),
+                                    "content": result2,
+                                }
+                            )
+                        text2, reasoning2, finish2, calls2 = self._stream_once(
+                            messages, on_delta, on_reasoning, stop_event, allow_tools=True
+                        )
+                    if text2:
+                        final = normalize_answer(strip_tool_xml(text2)) or final
 
                 # 机械检查：输出的是检索指引，却一次工具都没调用 → 强制核实后重写
                 if self._looks_like_guide(final) and not tool_used:
