@@ -229,7 +229,15 @@ CNKI 中国法律智库 lawpro.cnki.net、CNKI 中国学术会议网 conf.cnki.n
   双引号短语、复数与拼写变体；**不支持截词符 *（输入 electro* 不会匹配 electron/electrode）**
 - 中国庭审公开网可用案号检索；国家统计局 data.stats.gov.cn 走「地区数据→分省年度数据」
 
-【信息源需要登录或付费时】不要编造答案，也不要只回「无法核实」。改为输出一份**能直接照做的检索指引**，写清：
+【信息源需要登录或付费时】不要编造答案，也不要只回「无法核实」。改为输出一份**能直接照做的检索指引**。
+
+**写指引前必须先核实，严禁凭记忆写步骤：**
+- 必须至少调用一次工具：`fetch_web` 打开目标网站的公开页面（免登录能看到的首页/栏目页），
+  确认**实际的菜单名、按钮名、栏目名**；或 `search_web` 找到官方帮助页/教程。
+- 菜单名要照抄页面上真实出现的文字，不要用「可能是」「部分版本显示为」这类猜测措辞。
+- 若某一步确实无法核实，必须在该步后明确标注「（此步未核实，以实际页面为准）」。
+
+指引要写清：
 - 用哪个库（并说明有无免费替代，如国家哲学社会科学文献中心 ncpssd.cn、机构图书馆入口）
 - 入口路径：具体到点哪个按钮，如「CNKI 首页 → 高级检索」
 - 检索式：哪个字段 + 什么关键词 + 逻辑，如「篇名 = 信息素养 AND 出版年度 = 2015-2021」
@@ -466,6 +474,19 @@ class VisionClient:
         tool_calls = [calls[k] for k in sorted(calls)]
         return "".join(content).strip(), "".join(reasoning).strip(), finish, tool_calls
 
+    @staticmethod
+    def _looks_like_guide(text):
+        """判断输出是否为「检索指引」而非答案。"""
+        if not text:
+            return False
+        t = text.strip()
+        marks = ("检索指引", "操作步骤", "请按以下", "自行核实", "照做",
+                 "无法核实", "无法自动", "不能凭记忆", "入口路径", "检索步骤")
+        hit = sum(1 for m in marks if m in t)
+        if hit == 0:
+            return False
+        return len(t) > 80 or hit >= 2
+
     def _run_tool(self, call, on_stage):
         name = call.get("name", "")
         try:
@@ -537,6 +558,7 @@ class VisionClient:
                 messages = self._messages(png_bytes)
                 text = reasoning = ""
                 finish = None
+                tool_used = False
                 for round_no in range(self.web_max_rounds + 1):
                     last_round = round_no >= self.web_max_rounds
                     if last_round:
@@ -565,6 +587,7 @@ class VisionClient:
                         break
                     if not calls or last_round:
                         break
+                    tool_used = True
 
                     messages.append(
                         {
@@ -598,6 +621,64 @@ class VisionClient:
                 final = normalize_answer(strip_tool_xml(text))
                 if not final and reasoning:
                     final = strip_tool_xml(reasoning)
+
+                # 机械检查：输出的是检索指引，却一次工具都没调用 → 强制核实后重写
+                if self._looks_like_guide(final) and not tool_used:
+                    if on_stage:
+                        on_stage("指引未经核实，正在联网核实…")
+                    messages.append({"role": "assistant", "content": final})
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "你上面这份指引**一次工具都没有调用**，属于凭记忆写步骤，不可接受。\n"
+                                "现在请立即：\n"
+                                "1) 用 fetch_web 打开该网站的公开页面（免登录可见的首页/栏目页），"
+                                "确认菜单名与按钮名的真实文字；\n"
+                                "2) 必要时用 search_web 找官方帮助页或教程；\n"
+                                "3) 然后基于**你实际看到的内容**重写指引，菜单名照抄页面文字。\n"
+                                "确实无法核实的步骤，必须在该步后标注「（此步未核实，以实际页面为准）」。"
+                            ),
+                        }
+                    )
+                    text2, reasoning2, finish2, calls2 = self._stream_once(
+                        messages, on_delta, on_reasoning, stop_event, allow_tools=True
+                    )
+                    for _ in range(self.web_max_rounds):
+                        if not calls2:
+                            break
+                        tool_used = True
+                        messages.append(
+                            {
+                                "role": "assistant",
+                                "content": text2 or None,
+                                "tool_calls": [
+                                    {
+                                        "id": c["id"] or ("call_%d" % i),
+                                        "type": "function",
+                                        "function": {
+                                            "name": c["name"],
+                                            "arguments": c["arguments"] or "{}",
+                                        },
+                                    }
+                                    for i, c in enumerate(calls2)
+                                ],
+                            }
+                        )
+                        for i, c in enumerate(calls2):
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": c["id"] or ("call_%d" % i),
+                                    "content": self._run_tool(c, on_stage),
+                                }
+                            )
+                        text2, reasoning2, finish2, calls2 = self._stream_once(
+                            messages, on_delta, on_reasoning, stop_event, allow_tools=True
+                        )
+                    if text2:
+                        final = normalize_answer(strip_tool_xml(text2)) or final
+
                 if on_done:
                     on_done(final, reasoning, finish)
             except Exception as exc:  # noqa: BLE001
