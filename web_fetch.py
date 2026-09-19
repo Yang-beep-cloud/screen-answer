@@ -141,6 +141,15 @@ def extract_nav_links(html, base_url, limit=45):
 
 
 def extract_main(html, url=""):
+    """抽取正文。
+
+    trafilatura 并不总是可靠：实测同一份 HTML 连续调用会给出
+    13526 / 45581 / 0 三种结果，而且经常只抽到参考文献、把页面开头的
+    标题与作者行整段丢掉。所以这里加两道保险：
+    (1) 输出为空或过短 → 回退到 naive；
+    (2) 输出明显比 naive 短（不足其一半）→ 认为它漏了大块内容，改用 naive。
+    """
+    naive = _strip_tags(html)
     if trafilatura is not None:
         try:
             out = trafilatura.extract(
@@ -152,11 +161,54 @@ def extract_main(html, url=""):
                 favor_precision=True,
                 deduplicate=True,
             )
-            if out and len(out.strip()) > 80:
-                return out.strip()
+            out = out.strip() if out else ""
+            if len(out) > 80:
+                if len(naive) > 3000 and len(out) < len(naive) * 0.5:
+                    return naive
+                return out
         except Exception:  # noqa: BLE001
             pass
-    return _strip_tags(html)
+    return naive
+
+
+def _page_opening(html, main, naive):
+    """若正文提取把页面开头的标题/作者区当样板丢掉了，把这部分补回来。
+
+    实测 NCBI Bookshelf 的章节页：trafilatura 只抽出参考文献（13526 字），
+    把章节标题和「Angela Y Chang, Susan Horton, and Dean T Jamison」这行
+    作者整段丢掉，而题目问的恰好就是作者。naive 文本里这两样都在。
+    """
+    if not main or not naive:
+        return ""
+    # 优先用 <title>：站点常把 <h1> 当站名（NCBI 的 <h1> 就是「Bookshelf」），
+    # 而 <title> 才是文档标题。
+    title = ""
+    m = re.search(r"<title[^>]*>(.*?)</title>", html or "", re.S | re.I)
+    if m:
+        title = re.sub(r"\s+", " ", ANY_TAG.sub("", m.group(1))).strip()
+        title = re.split(r"\s+[-|–]\s+", title)[0].strip()  # 去掉「- 站点名」后缀
+    if len(title) < 8:
+        m = re.search(r"<h1[^>]*>(.*?)</h1>", html or "", re.S | re.I)
+        if m:
+            title = re.sub(r"\s+", " ", ANY_TAG.sub("", m.group(1))).strip()
+    if len(title) < 8:
+        return ""
+    head = title[:36]
+    pos = naive.find(head)
+    if pos < 0:
+        return ""
+    # 窗口要够大：NCBI 章节页 title 在第 0 字，作者行在第 1753 字
+    # （中间还夹着站点导航），窗口太小就会把作者行漏掉。
+    seg = naive[max(0, pos - 60): pos + 2600]
+    # 用分块包含率判断「这段开头是否已经在正文里」。
+    # 不能只看标题：实测正文里可能有标题却没有作者行。
+    chunks = [seg[i:i + 60] for i in range(0, len(seg), 200)]
+    chunks = [c for c in chunks if len(c) == 60]
+    if chunks:
+        present = sum(1 for c in chunks if c in main)
+        if present >= len(chunks) * 0.75:
+            return ""
+    return seg
 
 
 def tokens_of(text):
@@ -366,11 +418,14 @@ def fetch(url, query="", max_chars=DEFAULT_PAGE_CHARS, timeout=25,
     links = extract_nav_links(html, r.url or url)
     suffix = notes + ("\n" + links if links else "")
 
+    opening = ""
     if "html" in ctype or "xml" in ctype or not ctype:
         main = extract_main(html, url)
         naive = _strip_tags(html)
         if len(main) < 400 and len(naive) > 1500:
             main = naive
+        _op = _page_opening(html, main, naive)
+        opening = ("【页面开头（标题/作者区；正文提取常把这段当样板丢掉）】\n" + _op + "\n\n") if _op else ""
         if render_fallback and _looks_js_required(main, html):
             rendered, _err = render_with_browser(url, timeout=render_timeout)
             if rendered:
@@ -382,17 +437,19 @@ def fetch(url, query="", max_chars=DEFAULT_PAGE_CHARS, timeout=25,
                     if _looks_like_challenge(main):
                         return {"url": url, "ok": False, "text": "", "chars": 0,
                                 "error": CHALLENGE_ERROR}
-                    text = select_relevant(main, query, max_chars) + rsuffix
+                    ropening = _page_opening(rendered, main, rt)
+                    text = ropening + select_relevant(main, query, max_chars) + rsuffix
                     return {"url": url, "ok": True, "error": None, "text": text,
                             "chars": len(text), "rendered": True}
         text = main
     else:
         text = r.text
+        opening = ""
 
     if _looks_like_challenge(text):
         return {"url": url, "ok": False, "text": "", "chars": 0,
                 "error": CHALLENGE_ERROR}
-    text = select_relevant(text, query, max_chars) + suffix
+    text = opening + select_relevant(text, query, max_chars) + suffix
     return {"url": url, "ok": True, "error": None, "text": text, "chars": len(text),
             "rendered": False}
 
