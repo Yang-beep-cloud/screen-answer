@@ -8,6 +8,56 @@ import requests
 
 import web_fetch
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+KNOWLEDGE_DIR = os.path.join(HERE, "data")
+MODULE_LIST_PATH = os.path.join(KNOWLEDGE_DIR, "模块清单.md")
+KNOWLEDGE_PATH = os.path.join(KNOWLEDGE_DIR, "知识要点.md")
+
+_KNOWLEDGE_CACHE = {"modules": None, "full": None}
+
+
+def load_module_list():
+    if _KNOWLEDGE_CACHE["modules"] is None:
+        try:
+            with open(MODULE_LIST_PATH, "r", encoding="utf-8") as f:
+                _KNOWLEDGE_CACHE["modules"] = f.read().strip()
+        except OSError:
+            _KNOWLEDGE_CACHE["modules"] = ""
+    return _KNOWLEDGE_CACHE["modules"]
+
+
+def load_full_knowledge():
+    if _KNOWLEDGE_CACHE["full"] is None:
+        try:
+            with open(KNOWLEDGE_PATH, "r", encoding="utf-8") as f:
+                _KNOWLEDGE_CACHE["full"] = f.read()
+        except OSError:
+            _KNOWLEDGE_CACHE["full"] = ""
+    return _KNOWLEDGE_CACHE["full"]
+
+
+def search_knowledge(query, limit=3):
+    """在知识要点里按关键词检索，返回最相关的段落。"""
+    text = load_full_knowledge()
+    if not text:
+        return ""
+    if not query:
+        return text[:4000]
+    blocks = re.split(r"\n(?=#{2,3} )", text)
+    tokens = [t for t in re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_]{2,}", query.lower())]
+    if not tokens:
+        return text[:4000]
+    scored = []
+    for b in blocks:
+        low = b.lower()
+        score = sum(low.count(t) for t in tokens)
+        if score:
+            scored.append((score, len(b), b))
+    if not scored:
+        return "知识要点里没有与「%s」直接相关的内容。\n\n" % query + text[:1500]
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return "\n\n".join(b for _, _, b in scored[:limit])
+
 TOOL_XML_RE = re.compile(r"<tool_calls>.*?</tool_calls>", re.S | re.I)
 INVOKE_XML_RE = re.compile(r"<invoke\b.*?</invoke>", re.S | re.I)
 LOOSE_XML_RE = re.compile(r"</?(tool_calls|invoke|parameter)\b[^>]*>", re.I)
@@ -340,6 +390,27 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "knowledge_lookup",
+            "description": (
+                "查询大赛官方命题范围与样题知识库（含 50 个知识模块的命题要求、"
+                "44 道官方样题及正确答案、解析里给出的入口与操作）。"
+                "当你不确定某个知识模块考什么、或想参考官方样题的出法与解法时调用。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "关键词，如「截词检索」「CNKI 高级检索」「Zotero」",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 
@@ -351,7 +422,11 @@ class VisionClient:
     def __init__(self, cfg):
         self.base_url = cfg["base_url"].rstrip("/")
         self.model = cfg["model"]
-        self.system_prompt = cfg.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
+        base_prompt = cfg.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
+        modules = load_module_list()
+        self.system_prompt = (
+            base_prompt + "\n\n" + modules if modules else base_prompt
+        )
         self.max_tokens = cfg.get("max_tokens", 32768)
         self.temperature = cfg.get("temperature", 0.2)
         self.timeout = cfg.get("timeout", 300)
@@ -541,6 +616,12 @@ class VisionClient:
             if not g["ok"]:
                 return "GitHub 查询失败：%s" % g["error"]
             return g["text"]
+        if name == "knowledge_lookup":
+            q = (args.get("query") or "").strip()
+            if on_stage:
+                on_stage("正在查知识库：%s" % q[:30])
+            got = search_knowledge(q)
+            return got or "知识库为空。"
         return "未知工具"
 
     def answer_screen(
