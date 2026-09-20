@@ -356,6 +356,64 @@ def _is_docx(ctype, url, content):
     return content[:4] == DOCX_MAGIC and b"word/" in content[:4000]
 
 
+def pdf_page_count(content):
+    """返回 PDF 页数（无法解析时返回 0）。"""
+    try:
+        import pymupdf
+    except ImportError:
+        return 0
+    try:
+        doc = pymupdf.open(stream=content, filetype="pdf")
+        n = doc.page_count
+        doc.close()
+        return n
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def pdf_is_scanned(content, probe_pages=4):
+    """判断 PDF 是不是扫描件（没有文字层，必须靠 OCR/视觉模型读）。"""
+    try:
+        import pymupdf
+    except ImportError:
+        return False
+    try:
+        doc = pymupdf.open(stream=content, filetype="pdf")
+    except Exception:  # noqa: BLE001
+        return False
+    total = 0
+    for i in range(min(probe_pages, doc.page_count)):
+        try:
+            total += len(doc[i].get_text().strip())
+        except Exception:  # noqa: BLE001
+            pass
+    doc.close()
+    return total < 50
+
+
+def render_pdf_page(content, page_no=1, dpi=150):
+    """把 PDF 的第 page_no 页渲染成 PNG（1 起算），返回 bytes。"""
+    try:
+        import pymupdf
+    except ImportError:
+        return None
+    try:
+        doc = pymupdf.open(stream=content, filetype="pdf")
+    except Exception:  # noqa: BLE001
+        return None
+    idx = page_no - 1
+    if idx < 0 or idx >= doc.page_count:
+        doc.close()
+        return None
+    try:
+        pix = doc[idx].get_pixmap(dpi=dpi)
+        data = pix.tobytes("png")
+    except Exception:  # noqa: BLE001
+        data = None
+    doc.close()
+    return data
+
+
 GITHUB_API = "https://api.github.com"
 GH_TREE_RE = re.compile(
     r"^https?://github\.com/([^/]+)/([^/]+)/(?:tree|blob)/([^/]+)/?(.*)$", re.I
@@ -568,6 +626,8 @@ STRONG_CHALLENGE = (
     "unsupported browser",
     "browser is not supported",
     "your browser is out of date",
+    "client challenge",
+    "a required part of this site couldn",
 )
 
 # 弱标记：单独出现不足以判定（正常页面也会提到 captcha、请稍候、

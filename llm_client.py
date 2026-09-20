@@ -256,6 +256,49 @@ ScienceDirect、Wiley、UNESCO 数字图书馆、百度指数、智谱清言、A
 这些地址常写在网页的 script/JSON 里，普通正文提取看不到，但结果里会给你。
 遇到「教学设计/课件/附件」类题目，先抓栏目页，再从这份附件地址列表里找 .docx/.pdf 抓取。
 
+【文献细节题（作者数／页数／年份／参考文献数）的核实路径，实测有效】
+- **作者数**：pubmed_search 或 Europe PMC 拿 PubMed 记录，
+  作者列表长度就是作者数（例：某文 PubMed 显示 15 位作者）。
+- **出版年份**：同上，看 pubdate（如 2023 Jun 22 → 2023 年）。
+- **全文页数**：不要凭印象。两个可靠依据：
+  (1) 期刊页面/检索结果里的**页范围**：Nature 系列站内检索
+      `https://www.nature.com/search?q={关键词}`，结果条目会显示
+      「Open Access 22 Jun 2023 Nature Communications Volume: 14, P: 1-23」，
+      其中 **P: 1-23 即全文共 23 页**；
+  (2) 直接抓 PDF，程序会在开头给出「【PDF 共 N 页】」。
+- **参考文献数**：打开 PMC 全文（`https://pmc.ncbi.nlm.nih.gov/articles/{PMCID}/`，
+  fetch_web 可抓，需用较大 max_chars 才能覆盖到文末），
+  翻到 References 一节，看**最后一条的编号**就是总数
+  （例：编号连续到 65 → 65 篇，若选项写 55 则为错）。
+- Europe PMC 的 references 接口只返回部分被引条目，**不能**用来当参考文献总数。
+
+【《学术出版中AIGC使用边界指南3.0》（实测：扫描版，必须用 read_scanned_page）】
+- 官方 PDF 是**纯图片扫描件**（无文字层，fetch_web 只能取到 0 字），
+  必须用 `read_scanned_page` 读指定页。实测可用地址：
+  `http://scielab.pku.edu.cn/aigc/policy/pdf_files/istic_aigc_boundary_guide_3_0.pdf`
+  （共 12 页）
+- **页码偏移（关键）**：正文页码印在**页面底部**（03、04、05…），
+  与 PDF 页码差 2 —— **正文第 N 页 = PDF 第 N+2 页**。
+  实测：PDF 第 5 页=正文03（4.1.1 资料收集）、
+  **PDF 第 6 页=正文04（4.1.2 统计分析、4.1.3 图表制作）**、
+  PDF 第 7 页=正文05（4.1.4 文字撰写、4.1.5 语言和润色、4.1.6 引文整理）。
+  题目问「正文第 4 页」时不要直接读 PDF 第 4 页（那是「2 目标/3 原则」）。
+
+【全国标准信息公共服务平台 std.samr.gov.cn（实测可抓，标准全文能拿到）】
+- 检索接口（返回 HTML 结果列表，不是 JSON）：
+  `https://std.samr.gov.cn/search/stdPage?tid=&q={关键词}&op=`
+- 结果条目里带 `pid="..."`，详情页为：
+  `https://std.samr.gov.cn/hb/search/stdHBDetailed?id={pid}`
+- **标准全文 PDF 的地址藏在详情页的 script 里**（「查看文本/下载标准」按钮），
+  形如 `https://hbba.sacinfo.org.cn/portal/download/{一长串hash}`，
+  直接 fetch_web 抓这个地址就能拿到 PDF 全文（程序会自动解析并按页标注）。
+  例：CY/T 174—2019 学术出版规范 期刊学术不端行为界定，
+  pid=8CE6BE317879CE05E05397BE0A0A82EB，
+  全文 PDF=https://hbba.sacinfo.org.cn/portal/download/106d3905ac9d1ea10368f707ccdc33a02680eb41d12c919462e74f79e0d288a1
+  （实测该 PDF 共 11 页；3.1.3 图片和音视频剽窃在第 5 页）
+- 题目问「PDF 第几页」时，务必用【第 N 页】标记数，那是**按 PDF 阅读器页码**，
+  与标准正文的页码可能不同。
+
 【全国高校课程思政教学资源服务平台 xhsz.news.cn（实测可抓）】
 - 课程列表：https://xhsz.news.cn/curriculum （按 /curriculum/node?pid=N&subjectId=M 分类）
 - 课程详情：https://xhsz.news.cn/curriculum/detail/{课程ID}
@@ -349,6 +392,18 @@ CNKI 中国法律智库 lawpro.cnki.net、CNKI 中国学术会议网 conf.cnki.n
   多模态：图像视频(豆包/智谱清言/万相/可灵AI)、音乐(豆包)、数字人(闪剪/蝉镜)
   文献管理：知网研学、Zotero、Mendeley（导入方式：DOI/数据库检索/本地PDF/RIS·BibTeX题录）
   文献追踪：CNKI 关键词订阅与 RSS、万方「我的订阅」、PubMed Create RSS / Create Alert
+- **网络指数三件套的功能边界（官方培训材料 + 百科可查证）**：
+  · **微信指数不支持地域/省份筛选**，只支持 7 日／30 日／90 日三种时间范围
+    （百度百科「使用方法」原文只列这三种时间范围，未提地域）。
+    官方培训材料「知识模块29 网络指数」的探索题原文是：
+    「在**百度指数和抖音指数**两个平台上，分别对比最近一个月四川大学和
+    重庆大学**在陕西省**的指数情况」——**地域对比只要求百度指数和抖音指数，
+    微信指数被排除在外**。
+    因此凡是「微信指数可以看某省数据／按地域对比」的说法，一律判**错误**。
+  · 百度指数：支持地域（省份/城市）筛选，需登录；「人群画像」→「地域分布」。
+  · 抖音指数（原巨量算数）：支持地域筛选，需登录。
+  · 微信指数：仅有微信小程序入口，**无网页版**，程序无法访问；
+    涉及微信指数具体数据的题不要凭印象作答。
 - 免费学习资源入口：高校信息素养教育数据库 suyang.zxhnzq.com/lecture、
   知网学术大讲堂 k.cnki.net/home、万方视频 video.wangfangdata.com.cn、
   学习强国 xuexi.cn、和鲸社区 HeyWhale、百度 AI Studio、DataFountain
@@ -467,6 +522,27 @@ TOOLS = [
                     "ref": {"type": "string", "description": "分支或 tag，如 main；可留空"},
                 },
                 "required": ["owner", "repo"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_scanned_page",
+            "description": (
+                "读取**扫描版 PDF**（没有文字层、fetch_web 取不到字的官方文件/标准/指南）" 
+                "指定页的内容：程序把该页渲染成图片，再交给视觉模型逐字转录。" 
+                "题目问某扫描版文档「第 N 页写了什么」时用这个。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "PDF 地址"},
+                    "pages": {"type": "string",
+                              "description": "要读的页码，如 4 或 3,4（PDF 页码，1 起算）"},
+                    "hint": {"type": "string", "description": "你在找什么（可选）"},
+                },
+                "required": ["url"],
             },
         },
     },
@@ -690,6 +766,44 @@ class VisionClient:
         tool_calls = [calls[k] for k in sorted(calls)]
         return "".join(content).strip(), "".join(reasoning).strip(), finish, tool_calls
 
+    def _vision_transcribe(self, png_bytes, hint=""):
+        """用视觉模型把一张图片转录成文字（给扫描版 PDF 用）。
+
+        很多官方文件（指南、标准、报告）是纯图片扫描件，没有文字层，
+        PyMuPDF 取不到字。这里把该页渲染成 PNG，交给本程序已有的视觉模型读。
+        """
+        ask = (
+            "请把这张图片里的**全部文字**逐字转录出来，保持原有的层级与表格结构。\n"
+            "表格请用「| 列1 | 列2 |」的形式还原。只输出转录结果，不要评论。\n"
+            + (("重点关注：" + hint + "\n") if hint else "")
+        )
+        payload = {
+            "model": self.model,
+            "max_tokens": 4096,
+            "temperature": 0,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": ask},
+                    {"type": "image_url",
+                     "image_url": {"url": "data:image/png;base64,"
+                                          + base64.b64encode(png_bytes).decode("ascii")}},
+                ],
+            }],
+        }
+        headers = {"Authorization": "Bearer " + self.api_key,
+                   "Content-Type": "application/json"}
+        try:
+            r = requests.post(self.base_url + "/v1/chat/completions",
+                              headers=headers, data=json.dumps(payload),
+                              timeout=180)
+            if r.status_code != 200:
+                return ""
+            data = r.json()
+            return ((data.get("choices") or [{}])[0].get("message") or {}).get("content", "")
+        except Exception:  # noqa: BLE001
+            return ""
+
     @staticmethod
     def _tool_result_failed(text):
         """判断一次工具调用的结果是不是「没拿到东西」。"""
@@ -780,6 +894,40 @@ class VisionClient:
             if not g["ok"]:
                 return "GitHub 查询失败：%s" % g["error"]
             return g["text"]
+        if name == "read_scanned_page":
+            u = (args.get("url") or "").strip()
+            if not u.startswith("http"):
+                return "网址无效"
+            pages = (args.get("pages") or "1").strip()
+            hint = (args.get("hint") or "").strip()
+            if on_stage:
+                on_stage("正在读取扫描版文档：第 %s 页" % pages)
+            try:
+                r = web_fetch._get(u, timeout=60, total=90)
+                r.raise_for_status()
+            except requests.RequestException as exc:
+                return "下载失败：%s" % exc
+            content = r.content
+            if b"%PDF" not in content[:1024]:
+                return "该地址不是 PDF（read_scanned_page 只处理 PDF 扫描件）。"
+            total = web_fetch.pdf_page_count(content)
+            want = []
+            for part in re.split(r"[,，\s]+", pages):
+                if part.isdigit():
+                    want.append(int(part))
+            if not want:
+                want = [1]
+            out = ["【扫描版 PDF 逐页转录】共 %d 页，本次读取第 %s 页"
+                   % (total, "、".join(str(x) for x in want))]
+            for pno in want[:5]:
+                png = web_fetch.render_pdf_page(content, pno)
+                if not png:
+                    out.append("\n=== 第 %d 页 ===\n（渲染失败或页码超出范围）" % pno)
+                    continue
+                text = self._vision_transcribe(png, hint)
+                out.append("\n=== 第 %d 页 ===\n%s"
+                           % (pno, text.strip() or "（转录失败）"))
+            return "\n".join(out)
         if name == "oa_fulltext":
             doi = (args.get("doi") or "").strip()
             title = (args.get("title") or "").strip()
