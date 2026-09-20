@@ -275,6 +275,87 @@ def extract_pdf(content):
     return "\n".join(parts)
 
 
+DOCX_MAGIC = b"PK\x03\x04"
+W_T_RE = re.compile(r"<w:t[^>]*>(.*?)</w:t>", re.S)
+W_BR_RE = re.compile(r"<w:br\s*/?>|</w:p>", re.I)
+
+
+def extract_docx(content):
+    """从 .docx 提取正文（很多平台的「教学设计/课件」就是 docx 附件）。
+
+    不依赖 python-docx：docx 本质是 zip，正文在 word/document.xml。
+    """
+    import io as _io
+    import zipfile
+
+    try:
+        z = zipfile.ZipFile(_io.BytesIO(content))
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        xml = z.read("word/document.xml").decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        return None
+    xml = W_BR_RE.sub("\n", xml)
+    parts = []
+    for m in W_T_RE.finditer(xml):
+        t = m.group(1)
+        if "<" in t:
+            t = ANY_TAG.sub("", t)
+        parts.append(t)
+    text = "".join(parts)
+    for k, v in (("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"),
+                 ("&quot;", '"'), ("&apos;", "'")):
+        text = text.replace(k, v)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = "\n".join(ln.strip() for ln in text.split("\n") if ln.strip())
+    return text or None
+
+
+# 注意：JSON 里的地址常把斜杠转义成 \/（如 "upfile":"https:\/\/oss...\/x.docx"），
+# 所以模式里要允许反斜杠，匹配后再把 \/ 还原成 /。
+OFFICE_EXT_RE = re.compile(
+    r"""["'\s(](https?:\\?/\\?/[^"'\s<>()]+?\.(?:docx?|xlsx?|pptx?|pdf))(?=["'\s<>)]|$)""",
+    re.I)
+
+
+def extract_file_links(html, base_url="", limit=12):
+    """抽出页面（含 <script> 内嵌 JSON）里指向文档附件的 URL。
+
+    很多平台把「教学设计/课件」做成 docx 附件，地址写在 script 的 JSON 里
+    （如课程思政平台的 sss 数组 upfile 字段），_strip_tags 会把 script 整个
+    删掉，模型就无从得知。这里从原始 HTML 里把它们捞出来。
+    """
+    from urllib.parse import urljoin
+
+    out, seen = [], set()
+    for m in OFFICE_EXT_RE.finditer(html or ""):
+        u = m.group(1).replace("\\/", "/")
+        try:
+            u = urljoin(base_url or u, u)
+        except (ValueError, TypeError):
+            pass
+        if u in seen:
+            continue
+        seen.add(u)
+        out.append(u)
+        if len(out) >= limit:
+            break
+    if not out:
+        return ""
+    return "\n【本页内嵌的文档附件地址（可直接 fetch_web 打开）】\n" + \
+        "\n".join("- " + u for u in out)
+
+
+def _is_docx(ctype, url, content):
+    if "wordprocessingml" in ctype:
+        return True
+    if url.lower().split("?")[0].endswith(".docx"):
+        return True
+    return content[:4] == DOCX_MAGIC and b"word/" in content[:4000]
+
+
 GITHUB_API = "https://api.github.com"
 GH_TREE_RE = re.compile(
     r"^https?://github\.com/([^/]+)/([^/]+)/(?:tree|blob)/([^/]+)/?(.*)$", re.I
@@ -380,6 +461,13 @@ def fetch(url, query="", max_chars=DEFAULT_PAGE_CHARS, timeout=25,
         r = _get(url, timeout=timeout, total=total_timeout)
         r.raise_for_status()
         ctype = (r.headers.get("content-type") or "").lower()
+        if _is_docx(ctype, url, r.content):
+            doc_text = extract_docx(r.content)
+            if doc_text:
+                text = select_relevant(doc_text, query, max_chars)
+                return {"url": url, "ok": True, "error": None, "text": text,
+                        "chars": len(text), "rendered": False, "docx": True}
+            return {"url": url, "ok": False, "error": "DOCX 解析失败", "text": "", "chars": 0}
         is_pdf = "pdf" in ctype or url.lower().split("?")[0].endswith(".pdf")
         if is_pdf:
             pdf_text = extract_pdf(r.content)
@@ -416,7 +504,8 @@ def fetch(url, query="", max_chars=DEFAULT_PAGE_CHARS, timeout=25,
 
     notes = _soft_redirect_note(url, r.url)
     links = extract_nav_links(html, r.url or url)
-    suffix = notes + ("\n" + links if links else "")
+    files = extract_file_links(html, r.url or url)
+    suffix = notes + ("\n" + links if links else "") + ("\n" + files if files else "")
 
     opening = ""
     if "html" in ctype or "xml" in ctype or not ctype:
@@ -433,7 +522,8 @@ def fetch(url, query="", max_chars=DEFAULT_PAGE_CHARS, timeout=25,
                 if len(rt) > len(main):
                     main = rt
                     rlinks = extract_nav_links(rendered, r.url or url)
-                    rsuffix = notes + ("\n" + rlinks if rlinks else "")
+                    rfiles = extract_file_links(rendered, r.url or url)
+                    rsuffix = notes + ("\n" + rlinks if rlinks else "") + ("\n" + rfiles if rfiles else "")
                     if _looks_like_challenge(main):
                         return {"url": url, "ok": False, "text": "", "chars": 0,
                                 "error": CHALLENGE_ERROR}

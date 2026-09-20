@@ -251,6 +251,20 @@ ScienceDirect、Wiley、UNESCO 数字图书馆、百度指数、智谱清言、A
 
 【PDF 文档】fetch_web 会自动解析 PDF 并标注每页（【第 N 页】），同时给出总页数。注意**页码偏移**：题目说「正文第 N 页」时，正文往往不是从 PDF 第 1 页开始（前面有封面、目录），要先找到正文起始页再换算，例如封面+目录占 2 页时，正文第14页 = PDF 第16页。
 
+【DOCX 文档】fetch_web 也能解析 .docx（自动提取正文），直接抓附件地址即可。
+另外，**页面里内嵌的文档附件地址会被自动列出**（形如「【本页内嵌的文档附件地址】」），
+这些地址常写在网页的 script/JSON 里，普通正文提取看不到，但结果里会给你。
+遇到「教学设计/课件/附件」类题目，先抓栏目页，再从这份附件地址列表里找 .docx/.pdf 抓取。
+
+【全国高校课程思政教学资源服务平台 xhsz.news.cn（实测可抓）】
+- 课程列表：https://xhsz.news.cn/curriculum （按 /curriculum/node?pid=N&subjectId=M 分类）
+- 课程详情：https://xhsz.news.cn/curriculum/detail/{课程ID}
+- 「教学设计」「教学视频」等标签页**不在正文里**，而是页面 script 中的
+  sss 数组（含 upfile 字段）指向的 **docx 附件**；抓课程详情页时，
+  结果末尾的「本页内嵌的文档附件地址」就会列出该 docx，直接 fetch_web 抓它，
+  正文里就有「教学部门」「课程总学时」等字段（实测已核实）。
+  例：《中华文化瑰宝：苗族银饰》= detail/3049；《经世济民的经济学》= detail/873。
+
 以下站点本程序实测可直接抓取，优先去抓：
 国家药监局 nmpa.gov.cn、奎章阁 wenxianxue.cn、PubMed、课程思政平台 xhsz.news.cn、
 研招网 yz.chsi.com.cn、CNKI 首页、国家图书馆 nlc.cn、国家哲社文献中心 ncpssd.cn、
